@@ -1,4 +1,4 @@
-from typing import Literal, Any
+from typing import Literal, Any, Union
 
 from pydantic import BaseModel
 
@@ -104,7 +104,7 @@ class InputTextOrImageMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str | None = None
     source: Source | None = None
-    type: Literal["text", "image"]
+    type: Literal["text", "image"] = "text"
 
     def get_openai_compatible(self) -> dict[str, Any]:
         """Convert Anthropic text/image message to OpenAI format"""
@@ -140,7 +140,7 @@ class ToolChoice(BaseModel):
 
 class MessagesBody(BaseModel):
     model: str
-    messages: list[InputToolUseMessage | InputToolResultMessage | InputTextOrImageMessage]
+    messages: list[Union[InputTextOrImageMessage |InputToolUseMessage | InputToolResultMessage]]
     tools: list[ToolType] | None = None
     max_tokens: int = 16000
     stop_sequence: list[str] | None = None
@@ -148,6 +148,7 @@ class MessagesBody(BaseModel):
     top_k: int | None = None
     top_p: float | None = None
     temperature: float | None = None
+    stream: bool = False
 
     def get_openai_compatible_messages(self) -> list[dict[str, Any]]:
         """Convert all messages to OpenAI-compatible format"""
