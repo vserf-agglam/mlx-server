@@ -249,19 +249,15 @@ class Server:
 
         with wired_limit(self.model, [generation_stream]):
             while self.running:
-                # Add new prompts from queue
-                new_prompts_added = False
                 while not self.queue_prompts.empty():
                     try:
                         queue_item = self.queue_prompts.get_nowait()
-                        prompt = queue_item["prompt"]
                         max_tokens = queue_item["max_tokens"]
                         prompt_id = queue_item["prompt_id"]
 
                         logger.info(f"Adding prompt {prompt_id} to batch")
                         uids = gen.insert([queue_item["prompt_tokens"]], [max_tokens])
                         active_uids[uids[0]] = prompt_id
-                        new_prompts_added = True
 
                     except queue.Empty:
                         break
