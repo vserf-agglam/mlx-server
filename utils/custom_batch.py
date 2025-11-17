@@ -9,6 +9,7 @@ This module provides:
 - custom_batch_generate: a convenience wrapper similar to mlx_lm.batch_generate.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -31,6 +32,8 @@ from mlx_lm.generate import (
     generation_stream,
     wired_limit,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _batchify_kv_layer(
@@ -201,7 +204,15 @@ class CustomBatchGenerator:
         )
         return uids
 
-    def _process_prompts(self, prompts):
+    def _process_prompts_uniform(self, prompts):
+        """
+        Process a list of prompts where either
+        - all prompt_caches are None, or
+        - all prompt_caches are non-None.
+        """
+        if not prompts:
+            return None
+
         uids, inputs, max_tokens, prompt_caches = zip(*prompts)
         lengths = [len(p) for p in inputs]
         max_length = max(lengths)
@@ -233,6 +244,57 @@ class CustomBatchGenerator:
             [0] * len(uids),
             prompt_cache,
         )
+
+    def _process_prompts(self, prompts):
+        """
+        Process prompts for a single prefill step.
+
+        If some prompts have prefix caches and some do not, we
+        process the two groups separately (all-cached, all-None)
+        and then merge the resulting batches. This avoids issues
+        in _make_batch_cache_from_prompt_caches, which assumes
+        uniform cache presence within a batch.
+        """
+        if not prompts:
+            return None
+
+        # Split into prompts with/without caches if mixed.
+        has_cache_flags = [p[3] is not None for p in prompts]
+        if any(has_cache_flags) and not all(has_cache_flags):
+            cached_prompts = [p for p in prompts if p[3] is not None]
+            nocache_prompts = [p for p in prompts if p[3] is None]
+
+            logger.debug(
+                "CustomBatchGenerator: mixed batch with prefix caches: "
+                "%d cached, %d without cache",
+                len(cached_prompts),
+                len(nocache_prompts),
+            )
+
+            batch_cached = self._process_prompts_uniform(cached_prompts)
+            batch_nocache = self._process_prompts_uniform(nocache_prompts)
+
+            if batch_cached is None:
+                return batch_nocache
+            if batch_nocache is None:
+                return batch_cached
+
+            batch_cached.extend(batch_nocache)
+            return batch_cached
+
+        # Uniform case: all have caches or all do not.
+        if has_cache_flags and has_cache_flags[0]:
+            logger.debug(
+                "CustomBatchGenerator: batch uses prefix caches (n=%d)",
+                len(prompts),
+            )
+        else:
+            logger.debug(
+                "CustomBatchGenerator: batch without prefix caches (n=%d)",
+                len(prompts),
+            )
+
+        return self._process_prompts_uniform(prompts)
 
     def _step(self, input_tokens: mx.array, prompt_cache: List[Any]):
         logits = self.model(input_tokens, cache=prompt_cache)

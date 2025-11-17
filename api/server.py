@@ -5,7 +5,10 @@ import threading
 from typing import Literal, Generator
 from uuid import uuid4
 
+import mlx.core as mx
+
 from mlx_lm.generate import wired_limit, generation_stream
+from mlx_lm.models import cache as cache_mod
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from mlx_lm.utils import load
 
@@ -148,18 +151,64 @@ class Server:
             self.start_batch_processing()
 
         prompt = self.chat_template(messages_body, tokenize=False)
-        prompt_tokens = self.tokenizer.encode(prompt)
+        prompt_tokens_full = self.tokenizer.encode(prompt)
         prompt_id = f"prompt_{uuid4().hex}"
 
-        cache = self.prompt_cache_manager.load_cache_(prompt)
+        cache, cache_prompt = self.prompt_cache_manager.find_matching_cache_from_messages_body(
+            prompt_builder=self.chat_template,
+            message_body=messages_body,
+        )
+
+        # Decide which cache (if any) to use and what suffix tokens
+        # we still need to send to the model.
+        #
+        # Caches are created in continuous_batch_generate for a given
+        # prompt string by encoding that prompt, taking all but the last
+        # token as a prefix, and running the model to produce a cache
+        # representing that prefix. Therefore, for a cached prompt P with
+        # tokenization T(P), the cache covers len(T(P)) - 1 tokens.
+        #
+        # When we reuse such a cache for a new prompt that extends P,
+        # we only need to feed:
+        #   T(full_prompt)[len(T(P)) - 1:]
+        # i.e. the last token of P plus any additional suffix tokens.
+        prompt_tokens = prompt_tokens_full
+        prompt_cache_for_generator = None
+
+        exact_cache_hit = cache is not None and cache_prompt == prompt
+
+        if cache is not None and cache_prompt is not None:
+            cache_prompt_tokens = self.tokenizer.encode(cache_prompt)
+
+            # Ensure the cached prompt is a real prefix (in token space)
+            # of the full prompt; otherwise we cannot safely reuse it.
+            if (
+                len(cache_prompt_tokens) > 1
+                and len(cache_prompt_tokens) <= len(prompt_tokens_full)
+                and prompt_tokens_full[: len(cache_prompt_tokens)] == cache_prompt_tokens
+            ):
+                cached_token_count = len(cache_prompt_tokens) - 1
+
+                # We must still send at least one token.
+                if cached_token_count < len(prompt_tokens_full):
+                    prompt_tokens = prompt_tokens_full[cached_token_count:]
+                    prompt_cache_for_generator = cache
+
+        # We mark a cache hit only when we already have a cache for this
+        # exact prompt string. This way, continuous_batch_generate will
+        # still create and persist a new cache for genuinely new prompts,
+        # even if they reuse a shorter prefix cache.
+        cache_hit = exact_cache_hit
 
         # Initialize tracking
         self.active_generations[prompt_id] = {
             "tokens": [],
-            "input_tokens": len(prompt_tokens),
+            "input_tokens": len(prompt_tokens_full),
             "completed": False,
             "finish_reason": None,
-            "last_token_index": 0  # Track which tokens have been yielded for streaming
+            "last_token_index": 0,  # Track which tokens have been yielded for streaming
+            "prompt": prompt,
+            "prompt_cache_hit": cache_hit,
         }
 
         # Add to queue
@@ -169,7 +218,8 @@ class Server:
             "max_tokens": messages_body.max_tokens,
             "prompt_id": prompt_id,
             "input_tokens": len(prompt_tokens),
-            "prompt_cache": cache
+            "prompt_cache": prompt_cache_for_generator,
+            "prompt_cache_hit": cache_hit,
         })
 
         logger.debug(f"Added prompt {prompt_id} to batch queue")
@@ -303,12 +353,49 @@ class Server:
 
                                 gen_data = self.active_generations[prompt_id]
 
-                                if r.token is not None:
+                                # Do not append EOS / stop tokens to the output;
+                                # they are only used to signal termination.
+                                if r.token is not None and r.finish_reason != "stop":
                                     gen_data["tokens"].append(r.token)
 
                                 if r.finish_reason is not None:
                                     gen_data["completed"] = True
                                     gen_data["finish_reason"] = r.finish_reason
+                                    # Persist prompt cache if we did not have one yet.
+                                    if not gen_data.get("prompt_cache_hit"):
+                                        prompt_text = gen_data.get("prompt", "")
+                                        if prompt_text:
+                                            try:
+                                                prompt_tokens = self.tokenizer.encode(
+                                                    prompt_text
+                                                )
+                                                # We build a cache over the prefix
+                                                # tokens (all but the last token),
+                                                # and on subsequent calls we only
+                                                # feed the final token to rebuild
+                                                # the full context.
+                                                if len(prompt_tokens) > 1:
+                                                    prefix_tokens = prompt_tokens[:-1]
+                                                    cache = cache_mod.make_prompt_cache(
+                                                        self.model,
+                                                        max_kv_size=self.max_kv_size,
+                                                    )
+                                                    inputs = mx.array(
+                                                        [prefix_tokens],
+                                                        dtype=mx.uint32,
+                                                    )
+                                                    self.model(inputs, cache=cache)
+                                                    mx.eval(
+                                                        [c.state for c in cache]
+                                                    )
+                                                    self.prompt_cache_manager.save_cache(
+                                                        prompt_text, cache
+                                                    )
+                                            except Exception:
+                                                logger.exception(
+                                                    "Failed to save prompt cache for %s",
+                                                    prompt_id,
+                                                )
                                     logger.info(
                                         "Completed generation for %s (reason: %s)",
                                         prompt_id,
