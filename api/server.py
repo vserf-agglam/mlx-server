@@ -51,7 +51,9 @@ class Server:
         self.prefill_batch_size = prefill_batch_size
         self.completion_batch_size = completion_batch_size
         self.trust_remote_code = trust_remote_code
-        self.max_kv_size = max_kv_size
+        # Ensure max_kv_size is always an integer; this guards against
+        # CLI argument parsing passing a string value through.
+        self.max_kv_size = int(max_kv_size)
         self.cache_path = cache_path
         self.prompt_cache_manager = PromptCacheHelper(cache_path)
 
@@ -209,6 +211,7 @@ class Server:
             "last_token_index": 0,  # Track which tokens have been yielded for streaming
             "prompt": prompt,
             "prompt_cache_hit": cache_hit,
+            "messages_body": messages_body,
         }
 
         # Add to queue
@@ -247,7 +250,7 @@ class Server:
             generated_text,
             gen_data["input_tokens"],
             len(gen_data["tokens"]),
-            gen_data["finish_reason"]
+            gen_data["finish_reason"],
         )
 
         # Clean up if requested
@@ -361,41 +364,68 @@ class Server:
                                 if r.finish_reason is not None:
                                     gen_data["completed"] = True
                                     gen_data["finish_reason"] = r.finish_reason
-                                    # Persist prompt cache if we did not have one yet.
-                                    if not gen_data.get("prompt_cache_hit"):
-                                        prompt_text = gen_data.get("prompt", "")
-                                        if prompt_text:
-                                            try:
-                                                prompt_tokens = self.tokenizer.encode(
-                                                    prompt_text
+                                    # Persist prompt cache for this prompt if we did not
+                                    # have one yet, and precompute the cache for the
+                                    # next turn (assistant response appended) entirely
+                                    # on this background thread.
+                                    original_body = gen_data.get("messages_body")
+                                    prompt_text = gen_data.get("prompt", "")
+
+                                    try:
+                                        # Cache for the current prompt (if missing).
+                                        if (
+                                            prompt_text
+                                            and not gen_data.get("prompt_cache_hit")
+                                            and self.prompt_cache_manager.load_cache(
+                                                prompt_text
+                                            )
+                                            is None
+                                        ):
+                                            self._build_and_save_prompt_cache(
+                                                prompt_text
+                                            )
+
+                                        # Cache for the extended "next turn" prompt,
+                                        # built by appending this assistant response.
+                                        if original_body is not None:
+                                            generated_text = self.tokenizer.decode(
+                                                gen_data["tokens"]
+                                            )
+                                            tmp_response = (
+                                                self.create_messages_response(
+                                                    generated_text,
+                                                    gen_data["input_tokens"],
+                                                    len(gen_data["tokens"]),
+                                                    gen_data["finish_reason"],
                                                 )
-                                                # We build a cache over the prefix
-                                                # tokens (all but the last token),
-                                                # and on subsequent calls we only
-                                                # feed the final token to rebuild
-                                                # the full context.
-                                                if len(prompt_tokens) > 1:
-                                                    prefix_tokens = prompt_tokens[:-1]
-                                                    cache = cache_mod.make_prompt_cache(
-                                                        self.model,
-                                                        max_kv_size=self.max_kv_size,
-                                                    )
-                                                    inputs = mx.array(
-                                                        [prefix_tokens],
-                                                        dtype=mx.uint32,
-                                                    )
-                                                    self.model(inputs, cache=cache)
-                                                    mx.eval(
-                                                        [c.state for c in cache]
-                                                    )
-                                                    self.prompt_cache_manager.save_cache(
-                                                        prompt_text, cache
-                                                    )
-                                            except Exception:
-                                                logger.exception(
-                                                    "Failed to save prompt cache for %s",
-                                                    prompt_id,
+                                            )
+                                            extended_body = (
+                                                self.prompt_cache_manager.build_body_with_response(
+                                                    original_body,
+                                                    tmp_response,
                                                 )
+                                            )
+                                            if extended_body is not None:
+                                                extended_prompt = (
+                                                    self.chat_template(
+                                                        extended_body,
+                                                        tokenize=False,
+                                                    )
+                                                )
+                                                if (
+                                                    self.prompt_cache_manager.load_cache(
+                                                        extended_prompt
+                                                    )
+                                                    is None
+                                                ):
+                                                    self._build_and_save_prompt_cache(
+                                                        extended_prompt
+                                                    )
+                                    except Exception:
+                                        logger.exception(
+                                            "Failed to build prompt cache for %s",
+                                            prompt_id,
+                                        )
                                     logger.info(
                                         "Completed generation for %s (reason: %s)",
                                         prompt_id,
@@ -408,6 +438,39 @@ class Server:
                     time.sleep(0.01)
 
         logger.info("Continuous batch generation loop ended")
+
+    def _build_and_save_prompt_cache(self, prompt_text: str) -> None:
+        """
+        Build and persist a prompt cache for the given prompt string.
+
+        The cache is built over all but the last token of the prompt so that
+        future requests can reuse the prefix and only feed the remaining
+        suffix tokens to reconstruct the full context.
+        """
+        prompt_tokens = self.tokenizer.encode(prompt_text)
+        if len(prompt_tokens) <= 1:
+            return
+
+        prefix_tokens = prompt_tokens[:-1]
+        cache = cache_mod.make_prompt_cache(
+            self.model,
+            max_kv_size=self.max_kv_size,
+        )
+        inputs = mx.array([prefix_tokens], dtype=mx.uint32)
+        try:
+            self.model(inputs, cache=cache)
+            mx.eval([c.state for c in cache])
+        except OverflowError:
+            # If the underlying cache implementation overflows when trying
+            # to compute an internal prime size (e.g. for very large
+            # contexts), skip caching for this prompt instead of failing
+            # the whole request.
+            logger.exception(
+                "Overflow while building prompt cache; skipping cache for this prompt"
+            )
+            return
+
+        self.prompt_cache_manager.save_cache(prompt_text, cache)
 
     def generate(self, messages_body: MessagesBody, timeout: float = 300.0) -> MessagesResponse:
         """

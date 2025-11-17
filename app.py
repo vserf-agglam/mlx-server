@@ -379,9 +379,9 @@ def main():
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
     parser.add_argument('--port', type=int, default=8000, help='Port to bind to (default: 8000)')
     parser.add_argument('--reload', action='store_true', help='Enable auto-reload for development')
-    parser.add_argument("--max-kv-size", default=8096, help="Maximum size of key-value cache (default: 8096)")
-    parser.add_argument("--prefill-batch-size", default=8, help="Number of messages to prefill batch (default: 8)")
-    parser.add_argument("--completion-batch-size", default=32, help="Number of messages to complete batch (default: 8)")
+    parser.add_argument("--max-kv-size", type=int, default=8096, help="Maximum size of key-value cache (default: 8096)")
+    parser.add_argument("--prefill-batch-size", type=int, default=8, help="Number of messages to prefill batch (default: 8)")
+    parser.add_argument("--completion-batch-size", type=int, default=32, help="Number of messages to complete batch (default: 8)")
     parser.add_argument("--trust_remote_code", default=False, action='store_true', help='Trust remote code')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     parser.add_argument(

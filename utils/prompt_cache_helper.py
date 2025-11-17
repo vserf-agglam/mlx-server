@@ -4,7 +4,14 @@ from hashlib import md5
 
 from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 
-from api.types import MessagesBody
+from api.types import (
+    MessagesBody,
+    MessagesResponse,
+    InputTextOrImageMessage,
+    InputToolUseMessage,
+    OutputTextContentItem,
+    OutputToolContentItem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +47,72 @@ class PromptCacheHelper:
                 return cache, prompt
 
         return None, None
+
+    def build_body_with_response(
+        self,
+        original_body: MessagesBody,
+        response: MessagesResponse,
+    ) -> MessagesBody | None:
+        """
+        Create a new MessagesBody that represents the conversation after
+        the assistant reply has been added.
+
+        This is used to precompute and cache the prompt for the next turn,
+        so that future requests can reuse a longer cached prefix.
+        """
+        # Work on a shallow copy to avoid mutating the original request body.
+        new_body = MessagesBody(**original_body.model_dump())
+
+        # Reconstruct how this assistant turn would appear in the messages list,
+        # including both text content and tool calls, so that the resulting
+        # prompt string matches what a client is expected to send on the next
+        # turn.
+        current_text_parts: list[str] = []
+        appended_any = False
+
+        for item in response.content:
+            if isinstance(item, OutputTextContentItem):
+                current_text_parts.append(item.text)
+            elif isinstance(item, OutputToolContentItem):
+                # Flush any accumulated text as an assistant message before
+                # appending the tool call message, to keep ordering reasonable.
+                if current_text_parts:
+                    new_body.messages.append(
+                        InputTextOrImageMessage(
+                            role="assistant",
+                            content="\n\n".join(current_text_parts),
+                            type="text",
+                        )
+                    )
+                    appended_any = True
+                    current_text_parts = []
+
+                new_body.messages.append(
+                    InputToolUseMessage(
+                        type="tool_use",
+                        id=item.id,
+                        name=item.name,
+                        input=item.input,
+                    )
+                )
+                appended_any = True
+
+        # Flush any remaining assistant text at the end.
+        if current_text_parts:
+            new_body.messages.append(
+                InputTextOrImageMessage(
+                    role="assistant",
+                    content="\n\n".join(current_text_parts),
+                    type="text",
+                )
+            )
+            appended_any = True
+
+        if not appended_any:
+            # No text or tool calls to append; nothing to cache for the next turn.
+            return None
+
+        return new_body
 
 
     def save_cache(self, prompt: str, cache) -> None:
