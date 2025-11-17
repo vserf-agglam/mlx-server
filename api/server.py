@@ -1,42 +1,56 @@
 import logging
 import queue
 import time
-import json
-import re
 import threading
 from typing import Literal, Generator
 from uuid import uuid4
 
-from mlx_lm.generate import BatchGenerator, wired_limit, generation_stream
+from mlx_lm.generate import wired_limit, generation_stream
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from mlx_lm.utils import load
 
 from api.types import (
-    ToolType,
     MessagesBody,
     MessagesResponse,
-    OutputTextContentItem,
-    OutputToolContentItem,
-    Usage
+    Usage,
 )
 from token_parser.base_token_parser import BaseTokenParser
 from token_parser.token_parser_factory import TokenParserFactory
+from utils.custom_batch import CustomBatchGenerator
+from utils.prompt_cache_helper import PromptCacheHelper
 
 logger = logging.getLogger(__name__)
 
 
 class Server:
-    def __init__(self, model_name: str, token_parser_name: Literal["qwen3_moe"]):
+    def __init__(
+        self,
+        model_name: str,
+        token_parser_name: Literal["qwen3_moe"],
+        prefill_batch_size: int = 8,
+        completion_batch_size: int = 32,
+        trust_remote_code: bool = False,
+        max_kv_size=4096,
+        cache_path: str = "caches"
+    ):
         self.loaded = False
         self.model_name = model_name
         self.model = None
         self.tokenizer = None
         self.queue_prompts = queue.Queue(maxsize=0)
         self.token_parser_name = token_parser_name
-        self.token_parser: BaseTokenParser = TokenParserFactory.create(token_parser_name)
+        self.token_parser: BaseTokenParser = TokenParserFactory.create(
+            token_parser_name
+        )
         self.active_generations = {}  # prompt_id -> generation data
         self.batch_thread = None
         self.running = False
+        self.prefill_batch_size = prefill_batch_size
+        self.completion_batch_size = completion_batch_size
+        self.trust_remote_code = trust_remote_code
+        self.max_kv_size = max_kv_size
+        self.cache_path = cache_path
+        self.prompt_cache_manager = PromptCacheHelper(cache_path)
 
     def load(self):
         before_loading_time = time.time()
@@ -47,9 +61,6 @@ class Server:
         self.model = model
         self.tokenizer = TokenizerWrapper(tokenizer)
         self.loaded = True
-
-
-
 
     def unload(self):
         self.stop_batch_processing()
@@ -66,9 +77,9 @@ class Server:
             openai_messages,
             tools=openai_tools,
             add_generation_prompt=True,
+            trust_remote_code=self.trust_remote_code,
             **kwargs
         )
-
 
     def count_input_tokens(self, messages_body: MessagesBody):
         """Count the number of input tokens for a given chat template"""
@@ -140,6 +151,8 @@ class Server:
         prompt_tokens = self.tokenizer.encode(prompt)
         prompt_id = f"prompt_{uuid4().hex}"
 
+        cache = self.prompt_cache_manager.load_cache_(prompt)
+
         # Initialize tracking
         self.active_generations[prompt_id] = {
             "tokens": [],
@@ -155,7 +168,8 @@ class Server:
             "prompt_tokens": prompt_tokens,
             "max_tokens": messages_body.max_tokens,
             "prompt_id": prompt_id,
-            "input_tokens": len(prompt_tokens)
+            "input_tokens": len(prompt_tokens),
+            "prompt_cache": cache
         })
 
         logger.debug(f"Added prompt {prompt_id} to batch queue")
@@ -242,7 +256,14 @@ class Server:
         if not self.loaded:
             raise RuntimeError("Model not loaded. Call load() first.")
 
-        gen = BatchGenerator(self.model, stop_tokens=set(self.tokenizer.eos_token_ids))
+        gen = CustomBatchGenerator(
+            self.model,
+            max_tokens=128000,
+            stop_tokens=set(self.tokenizer.eos_token_ids),
+            prefill_batch_size=self.prefill_batch_size,
+            completion_batch_size=self.completion_batch_size,
+            max_kv_size=self.max_kv_size,
+        )
         active_uids = {}  # Maps batch uid to prompt_id
 
         logger.info("Starting continuous batch generation loop")
@@ -256,7 +277,11 @@ class Server:
                         prompt_id = queue_item["prompt_id"]
 
                         logger.info(f"Adding prompt {prompt_id} to batch")
-                        uids = gen.insert([queue_item["prompt_tokens"]], [max_tokens])
+                        uids = gen.insert(
+                            [queue_item["prompt_tokens"]],
+                            [max_tokens],
+                            prompt_caches=[queue_item["prompt_cache"]],
+                        )
                         active_uids[uids[0]] = prompt_id
 
                     except queue.Empty:
@@ -271,7 +296,9 @@ class Server:
                                 prompt_id = active_uids[r.uid]
 
                                 if prompt_id not in self.active_generations:
-                                    logger.warning(f"Prompt {prompt_id} not in active generations")
+                                    logger.warning(
+                                        f"Prompt {prompt_id} not in active generations"
+                                    )
                                     continue
 
                                 gen_data = self.active_generations[prompt_id]
@@ -282,7 +309,11 @@ class Server:
                                 if r.finish_reason is not None:
                                     gen_data["completed"] = True
                                     gen_data["finish_reason"] = r.finish_reason
-                                    logger.info(f"Completed generation for {prompt_id} (reason: {r.finish_reason})")
+                                    logger.info(
+                                        "Completed generation for %s (reason: %s)",
+                                        prompt_id,
+                                        r.finish_reason,
+                                    )
                                     # Remove from active tracking
                                     del active_uids[r.uid]
                 else:

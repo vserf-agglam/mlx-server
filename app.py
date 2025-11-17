@@ -38,7 +38,10 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8000
     verbose: bool = False
-
+    prefill_batch_size: int = 8
+    completion_batch_size: int = 32
+    trust_remote_code : bool = False,
+    max_kv_size: int = 4096
 
 # Global instances
 config: ServerConfig | None = None
@@ -83,7 +86,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"Loading model: {config.model_name}")
     server = Server(
         model_name=config.model_name,
-        token_parser_name=config.token_parser_name
+        token_parser_name=config.token_parser_name,
+        prefill_batch_size=config.prefill_batch_size,
+        completion_batch_size=config.completion_batch_size,
+        trust_remote_code=config.trust_remote_code,
     )
     server.load()
     server.start_batch_processing()
@@ -374,6 +380,9 @@ def main():
     parser.add_argument('--port', type=int, default=8000, help='Port to bind to (default: 8000)')
     parser.add_argument('--reload', action='store_true', help='Enable auto-reload for development')
     parser.add_argument("--max-kv-size", default=8096, help="Maximum size of key-value cache (default: 8096)")
+    parser.add_argument("--prefill-batch-size", default=8, help="Number of messages to prefill batch (default: 8)")
+    parser.add_argument("--completion-batch-size", default=32, help="Number of messages to complete batch (default: 8)")
+    parser.add_argument("--trust_remote_code", default=False, action='store_true', help='Trust remote code')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     parser.add_argument(
         '--token-parser',
@@ -394,7 +403,12 @@ def main():
         token_parser_name=args.token_parser,
         host=args.host,
         port=args.port,
-        verbose=args.verbose
+        verbose=args.verbose,
+        completion_batch_size=args.completion_batch_size,
+        prefill_batch_size=args.prefill_batch_size,
+        trust_remote_code=args.trust_remote_code,
+        max_kv_size=args.max_kv_size
+
     )
 
     signal.signal(signal.SIGINT, signal_handler)  # Handle Ctrl+C
