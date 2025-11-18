@@ -1,9 +1,9 @@
 import json
 import re
-from uuid import uuid4
 
 from api.types import OutputToolContentItem, OutputTextContentItem
 from token_parser.base_token_parser import BaseTokenParser, logger
+from utils.tool_stream_helper import make_tool_call_id
 
 
 class Qwen3MoeParser(BaseTokenParser):
@@ -14,7 +14,10 @@ class Qwen3MoeParser(BaseTokenParser):
     """
 
     def __init__(self):
-        self.tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
+        # Hints used by streaming helpers to avoid emitting partial blocks.
+        self.tool_call_open_tag = "<tool_call>"
+        self.tool_call_close_tag = "</tool_call>"
+        self.tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
 
     def parse_tool_calls(
             self,
@@ -49,9 +52,10 @@ class Qwen3MoeParser(BaseTokenParser):
 
             # Parse tool call JSON
             try:
-                tool_data = json.loads(match.group(1))
+                raw_tool_json = match.group(1)
+                tool_data = json.loads(raw_tool_json)
                 content.append(OutputToolContentItem(
-                    id=f"toolu_{uuid4().hex[:8]}",
+                    id=make_tool_call_id(raw_tool_json),
                     name=tool_data.get("name", ""),
                     input=tool_data.get("arguments", {})
                 ))

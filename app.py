@@ -9,7 +9,6 @@ import atexit
 import signal
 import sys
 import logging
-import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
@@ -21,6 +20,17 @@ import uvicorn
 
 from api.types import MessagesBody, MessagesResponse
 from api.server import Server
+from utils.sse_event_builders import (
+    build_sse_event,
+    build_text_delta_event,
+    build_tool_call_event,
+    build_message_start_event,
+    build_content_block_start_event,
+    build_content_block_stop_event,
+    build_message_delta_event,
+    build_message_stop_event,
+    build_error_event,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -263,108 +273,98 @@ async def stream_response(request: MessagesBody):
     Follows Anthropic's streaming format.
     """
     global server
-    input_tokens = server.count_input_tokens(request)  # You'll need to implement this
+    input_tokens = server.count_input_tokens(request)
+
+    # Enable tool-aware streaming only when tools are provided.
+    from utils.tool_stream_helper import ToolStreamHelper
+
+    use_tools = bool(request.tools)
+    tool_helper = ToolStreamHelper(
+        token_parser=getattr(server, "token_parser", None),
+        enable_tools=use_tools,
+    )
 
     try:
         # Send message_start event
-        message_start = {
-            "type": "message_start",
-            "message": {
-                "id": f"msg_stream_{request.model}",
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": request.model,
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": 0
-                }
-            }
-        }
-        yield f"event: message_start\ndata: {json.dumps(message_start)}\n\n"
+        yield build_sse_event(
+            "message_start",
+            build_message_start_event(f"msg_stream_{request.model}", request.model, input_tokens)
+        )
 
         # Send content_block_start event
-        content_block_start = {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {
-                "type": "text",
-                "text": ""
-            }
-        }
-        yield f"event: content_block_start\ndata: {json.dumps(content_block_start)}\n\n"
+        yield build_sse_event("content_block_start", build_content_block_start_event())
 
         # Stream the actual content
         generator = server.generate_stream(request, timeout=300.0)
+        final_response: MessagesResponse | None = None
 
-        for chunk in generator:
-            if isinstance(chunk, dict) and "delta" in chunk:
-                # Send content_block_delta event
-                delta = {
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {
-                        "type": "text_delta",
-                        "text": chunk["delta"]
-                    }
-                }
-                yield f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n"
-            elif isinstance(chunk, MessagesResponse):
-                # This is the final response
-                final_response = chunk
+        try:
+            while True:
+                chunk = next(generator)
 
-                # Send content_block_stop event
-                content_block_stop = {
-                    "type": "content_block_stop",
-                    "index": 0
-                }
-                yield f"event: content_block_stop\ndata: {json.dumps(content_block_stop)}\n\n"
+                # Model token chunk.
+                if isinstance(chunk, dict) and "delta" in chunk:
+                    text_chunk = chunk["delta"]
+                    if not use_tools:
+                        if text_chunk:
+                            yield build_sse_event("content_block_delta", build_text_delta_event(text_chunk))
+                        continue
 
-                # Send message_delta event
-                message_delta = {
-                    "type": "message_delta",
-                    "delta": {
-                        "stop_reason": final_response.stop_reason,
-                        "stop_sequence": final_response.stop_sequence
-                    },
-                    "usage": {
-                        "input_tokens": final_response.usage.input_tokens,
-                        "output_tokens": final_response.usage.output_tokens
-                    }
-                }
-                yield f"event: message_delta\ndata: {json.dumps(message_delta)}\n\n"
+                    # Tool-aware path: split text into plain text and tool calls.
+                    events = tool_helper.feed(text_chunk)
+                    for ev in events:
+                        kind = ev.get("kind")
+                        if kind == "text_delta":
+                            if ev.get("text"):
+                                yield build_sse_event("content_block_delta", build_text_delta_event(ev["text"]))
+                        elif kind == "tool_call":
+                            yield build_sse_event("tool_call", build_tool_call_event(ev["id"], ev["name"], ev["arguments"]))
 
-                # Send message_stop event
-                message_stop = {
-                    "type": "message_stop"
-                }
-                yield f"event: message_stop\ndata: {json.dumps(message_stop)}\n\n"
+                    continue
 
-                break
+                # In case generate_stream ever yields the final response.
+                if isinstance(chunk, MessagesResponse):
+                    final_response = chunk
+                    break
+
+        except StopIteration as e:
+            final_response = e.value
+
+        if final_response is not None:
+            # Flush any remaining buffered text/tool events before closing.
+            if use_tools:
+                for ev in tool_helper.flush():
+                    kind = ev.get("kind")
+                    if kind == "text_delta":
+                        if ev.get("text"):
+                            yield build_sse_event("content_block_delta", build_text_delta_event(ev["text"]))
+                    elif kind == "tool_call":
+                        yield build_sse_event("tool_call", build_tool_call_event(ev["id"], ev["name"], ev["arguments"]))
+
+            # Send content_block_stop event
+            yield build_sse_event("content_block_stop", build_content_block_stop_event())
+
+            # Send message_delta event
+            yield build_sse_event(
+                "message_delta",
+                build_message_delta_event(
+                    final_response.stop_reason,
+                    final_response.stop_sequence,
+                    final_response.usage.input_tokens,
+                    final_response.usage.output_tokens
+                )
+            )
+
+            # Send message_stop event
+            yield build_sse_event("message_stop", build_message_stop_event())
 
     except TimeoutError as e:
         logger.error(f"Stream timeout: {e}")
-        error_event = {
-            "type": "error",
-            "error": {
-                "type": "timeout_error",
-                "message": "Request timeout"
-            }
-        }
-        yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+        yield build_sse_event("error", build_error_event("timeout_error", "Request timeout"))
 
     except Exception as e:
         logger.error(f"Error during streaming: {e}", exc_info=True)
-        error_event = {
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": str(e)
-            }
-        }
-        yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+        yield build_sse_event("error", build_error_event("api_error", str(e)))
 
 
 def main():
