@@ -156,23 +156,42 @@ class InputTextOrImageMessage(BaseModel):
         """Convert Anthropic text/image message to OpenAI format"""
         if self.type == "text":
             content_value: str | None = self.content
+            tool_calls: list[dict[str, Any]] = []
+
             if isinstance(self.content, list):
                 text_parts: list[str] = []
                 for part in self.content:
                     if isinstance(part, dict):
-                        text_value = part.get("text")
-                        if isinstance(text_value, str):
-                            text_parts.append(text_value)
+                        # Handle tool_use blocks separately
+                        if part.get("type") == "tool_use":
+                            tool_calls.append({
+                                "id": part.get("id"),
+                                "type": "function",
+                                "function": {
+                                    "name": part.get("name"),
+                                    "arguments": json.dumps(part.get("input", {}))
+                                }
+                            })
                         else:
-                            text_parts.append(json.dumps(part))
+                            # Handle text blocks
+                            text_value = part.get("text")
+                            if isinstance(text_value, str):
+                                text_parts.append(text_value)
                     else:
                         text_parts.append(str(part))
-                content_value = "\n\n".join(text_parts)
 
-            return {
+                content_value = "\n\n".join(text_parts) if text_parts else None
+
+            # Return message with both content and tool_calls if we have tool calls
+            result = {
                 "role": self.role,
                 "content": content_value
             }
+
+            if tool_calls:
+                result["tool_calls"] = tool_calls
+
+            return result
         elif self.type == "image" and self.source:
             # OpenAI format for images
             if self.source.type == "url":

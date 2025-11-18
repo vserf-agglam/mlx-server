@@ -64,53 +64,34 @@ class PromptCacheHelper:
         new_body = MessagesBody(**original_body.model_dump())
 
         # Reconstruct how this assistant turn would appear in the messages list,
-        # including both text content and tool calls, so that the resulting
-        # prompt string matches what a client is expected to send on the next
-        # turn.
-        current_text_parts: list[str] = []
-        appended_any = False
+        # including both text content and tool calls as a single message with
+        # a content array. This matches Anthropic's format where a single
+        # assistant message can contain multiple content blocks.
+        content_blocks = []
 
         for item in response.content:
             if isinstance(item, OutputTextContentItem):
-                current_text_parts.append(item.text)
+                content_blocks.append({"type": "text", "text": item.text})
             elif isinstance(item, OutputToolContentItem):
-                # Flush any accumulated text as an assistant message before
-                # appending the tool call message, to keep ordering reasonable.
-                if current_text_parts:
-                    new_body.messages.append(
-                        InputTextOrImageMessage(
-                            role="assistant",
-                            content="\n\n".join(current_text_parts),
-                            type="text",
-                        )
-                    )
-                    appended_any = True
-                    current_text_parts = []
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": item.id,
+                    "name": item.name,
+                    "input": item.input
+                })
 
-                new_body.messages.append(
-                    InputToolUseMessage(
-                        type="tool_use",
-                        id=item.id,
-                        name=item.name,
-                        input=item.input,
-                    )
-                )
-                appended_any = True
-
-        # Flush any remaining assistant text at the end.
-        if current_text_parts:
-            new_body.messages.append(
-                InputTextOrImageMessage(
-                    role="assistant",
-                    content="\n\n".join(current_text_parts),
-                    type="text",
-                )
-            )
-            appended_any = True
-
-        if not appended_any:
+        if not content_blocks:
             # No text or tool calls to append; nothing to cache for the next turn.
             return None
+
+        # Create a SINGLE assistant message with all content blocks
+        new_body.messages.append(
+            InputTextOrImageMessage(
+                role="assistant",
+                content=content_blocks,
+                type="text",
+            )
+        )
 
         return new_body
 
