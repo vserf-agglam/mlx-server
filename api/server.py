@@ -96,7 +96,13 @@ class Server:
         """Count the number of input tokens for a given chat template"""
         prompt = self.chat_template(messages_body, tokenize=False)
         prompt_tokens = self.tokenizer.encode(prompt)
-        return len(prompt_tokens)
+        token_count = len(prompt_tokens)
+        logger.debug(
+            "count_input_tokens: prompt_len_chars=%d, token_count=%d",
+            len(prompt),
+            token_count,
+        )
+        return token_count
 
     def create_messages_response(
             self,
@@ -169,6 +175,13 @@ class Server:
         prompt = self.chat_template(messages_body, tokenize=False)
         prompt_tokens_full = self.tokenizer.encode(prompt)
         prompt_id = f"prompt_{uuid4().hex}"
+        logger.debug(
+            "add_to_batch: created prompt_id=%s, prompt_len_chars=%d, "
+            "prompt_tokens_full_len=%d",
+            prompt_id,
+            len(prompt),
+            len(prompt_tokens_full),
+        )
 
         cache, cache_prompt = self.prompt_cache_manager.find_matching_cache_from_messages_body(
             # For cache lookup, use a canonical prompt that does NOT
@@ -345,6 +358,15 @@ class Server:
         new_tokens = gen_data["tokens"][last_index:]
         gen_data["last_token_index"] = len(gen_data["tokens"])
 
+        if new_tokens:
+            logger.debug(
+                "get_streaming_tokens: prompt_id=%s, new_tokens_count=%d, "
+                "new_tokens=%s",
+                prompt_id,
+                len(new_tokens),
+                new_tokens,
+            )
+
         return new_tokens
 
     def continuous_batch_generate(self):
@@ -406,6 +428,13 @@ class Server:
                                 # they are only used to signal termination.
                                 if r.token is not None and r.finish_reason != "stop":
                                     gen_data["tokens"].append(r.token)
+                                    logger.debug(
+                                        "continuous_batch_generate: prompt_id=%s, "
+                                        "appended_token=%s, total_tokens=%d",
+                                        prompt_id,
+                                        r.token,
+                                        len(gen_data["tokens"]),
+                                    )
 
                                 if r.finish_reason is not None:
                                     gen_data["completed"] = True
@@ -634,6 +663,13 @@ class Server:
             if new_tokens:
                 # Decode and yield new tokens
                 token_text = self.tokenizer.decode(new_tokens)
+                logger.debug(
+                    "generate_stream: prompt_id=%s, decoded_text_len=%d, "
+                    "decoded_text=%r",
+                    prompt_id,
+                    len(token_text) if token_text else 0,
+                    token_text[:100] if token_text else "",
+                )
                 if token_text:
                     yield {"delta": token_text}
 

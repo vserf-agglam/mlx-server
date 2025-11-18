@@ -41,11 +41,20 @@ class Qwen3MoeParser(BaseTokenParser):
         Returns:
             Tuple of (content_items, stop_reason)
         """
+        logger.debug(
+            "parse_tool_calls: parsing text, text_len=%d, text_preview=%r",
+            len(text),
+            text[:200] if len(text) > 200 else text,
+        )
         content = []
         stop_reason = "end_turn"
 
         # Find all tool call matches
         matches = list(re.finditer(self.tool_call_pattern, text, re.DOTALL))
+        logger.debug(
+            "parse_tool_calls: found %d tool_call matches",
+            len(matches),
+        )
 
         if not matches:
             # No tool calls found, return entire text
@@ -62,20 +71,36 @@ class Qwen3MoeParser(BaseTokenParser):
             # Parse tool call with XML-like format
             try:
                 tool_content = match.group(1).strip()
-                
+                logger.debug(
+                    "parse_tool_calls: parsing tool_call block, "
+                    "tool_content_len=%d, tool_content=%r",
+                    len(tool_content),
+                    tool_content[:500] if len(tool_content) > 500 else tool_content,
+                )
+
                 # Extract function name and parameters
                 function_match = re.search(self.function_pattern, tool_content, re.DOTALL)
                 if function_match:
                     function_name = function_match.group(1)
                     function_content = function_match.group(2)
+                    logger.debug(
+                        "parse_tool_calls: extracted function_name=%s, "
+                        "function_content_len=%d",
+                        function_name,
+                        len(function_content),
+                    )
                     
                     # Extract parameters
                     parameters = {}
-                    param_matches = re.finditer(self.parameter_pattern, function_content, re.DOTALL)
+                    param_matches = list(re.finditer(self.parameter_pattern, function_content, re.DOTALL))
+                    logger.debug(
+                        "parse_tool_calls: found %d parameter matches",
+                        len(param_matches),
+                    )
                     for param_match in param_matches:
                         param_name = param_match.group(1)
                         param_value = param_match.group(2).strip()
-                        
+
                         # Try to parse as JSON if it looks like JSON
                         if (param_value.startswith('{') and param_value.endswith('}')) or \
                            (param_value.startswith('[') and param_value.endswith(']')):
@@ -84,16 +109,29 @@ class Qwen3MoeParser(BaseTokenParser):
                             except json.JSONDecodeError:
                                 # Keep as string if JSON parsing fails
                                 pass
-                        
+
                         parameters[param_name] = param_value
+                        logger.debug(
+                            "parse_tool_calls: extracted parameter, param_name=%s, "
+                            "param_value_preview=%r",
+                            param_name,
+                            str(param_value)[:200] if len(str(param_value)) > 200 else param_value,
+                        )
                     
+                    tool_call_id = make_tool_call_id(tool_content)
                     content.append(OutputToolContentItem(
                         type="tool_use",
-                        id=make_tool_call_id(tool_content),
+                        id=tool_call_id,
                         name=function_name,
                         input=parameters
                     ))
-                    logger.debug(f"Parsed tool call: {function_name}")
+                    logger.debug(
+                        "parse_tool_calls: created OutputToolContentItem, "
+                        "tool_call_id=%s, function_name=%s, parameters=%s",
+                        tool_call_id,
+                        function_name,
+                        parameters,
+                    )
                 else:
                     # If no function tag found, log error and add as text
                     logger.error(f"No function tag found in tool call")

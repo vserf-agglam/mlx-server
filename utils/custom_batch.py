@@ -297,10 +297,19 @@ class CustomBatchGenerator:
         return self._process_prompts_uniform(prompts)
 
     def _step(self, input_tokens: mx.array, prompt_cache: List[Any]):
+        logger.debug(
+            "_step: generating next token, input_tokens_shape=%s",
+            input_tokens.shape,
+        )
         logits = self.model(input_tokens, cache=prompt_cache)
         logits = logits[:, -1, :]
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         sampled = self.sampler(logprobs)
+        logger.debug(
+            "_step: sampled tokens, sampled_shape=%s, sampled=%s",
+            sampled.shape,
+            sampled.tolist() if sampled.size <= 10 else f"{sampled.tolist()[:10]}...",
+        )
         return sampled, logprobs
 
     def stats(self):
@@ -384,6 +393,15 @@ class CustomBatchGenerator:
             else:
                 finish_reason = None
                 keep_idx.append(e)
+            logger.debug(
+                "_next: creating Response, uid=%s, token=%s, num_tokens=%d/%d, "
+                "finish_reason=%s",
+                uid,
+                t,
+                num_tok,
+                max_tok,
+                finish_reason,
+            )
             responses.append(
                 CustomBatchGenerator.Response(uid, t, logprobs[e], finish_reason)
             )
