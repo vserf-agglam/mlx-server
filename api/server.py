@@ -74,14 +74,20 @@ class Server:
         self.loaded = False
 
     def chat_template(self, messages_body: MessagesBody, **kwargs):
-        """Apply chat template with OpenAI-compatible format"""
+        """Apply chat template with OpenAI-compatible format.
+
+        By default, add_generation_prompt=True (to append the assistant
+        generation stub), but callers can override this via kwargs.
+        """
         openai_messages = messages_body.get_openai_compatible_messages()
         openai_tools = messages_body.get_openai_compatible_tools()
+
+        # Allow callers to override whether the generation stub is added.
+        kwargs.setdefault("add_generation_prompt", True)
 
         return self.tokenizer.apply_chat_template(
             openai_messages,
             tools=openai_tools,
-            add_generation_prompt=True,
             trust_remote_code=self.trust_remote_code,
             **kwargs
         )
@@ -157,50 +163,82 @@ class Server:
         prompt_id = f"prompt_{uuid4().hex}"
 
         cache, cache_prompt = self.prompt_cache_manager.find_matching_cache_from_messages_body(
-            prompt_builder=self.chat_template,
+            # For cache lookup, use a canonical prompt that does NOT
+            # include the final assistant generation stub. This ensures
+            # that cached prefixes remain valid when new user turns are
+            # appended before the stub in subsequent requests.
+            prompt_builder=lambda body, tokenize=False: self.chat_template(
+                body,
+                tokenize=tokenize,
+                add_generation_prompt=False,
+            ),
             message_body=messages_body,
         )
-
-        # Decide which cache (if any) to use and what suffix tokens
-        # we still need to send to the model.
-        #
-        # Caches are created in continuous_batch_generate for a given
-        # prompt string by encoding that prompt, taking all but the last
-        # token as a prefix, and running the model to produce a cache
-        # representing that prefix. Therefore, for a cached prompt P with
-        # tokenization T(P), the cache covers len(T(P)) - 1 tokens.
-        #
-        # When we reuse such a cache for a new prompt that extends P,
-        # we only need to feed:
-        #   T(full_prompt)[len(T(P)) - 1:]
-        # i.e. the last token of P plus any additional suffix tokens.
         prompt_tokens = prompt_tokens_full
         prompt_cache_for_generator = None
-
-        exact_cache_hit = cache is not None and cache_prompt == prompt
+        cache_prompt_tokens_len: int | None = None
 
         if cache is not None and cache_prompt is not None:
             cache_prompt_tokens = self.tokenizer.encode(cache_prompt)
+            cache_prompt_tokens_len = len(cache_prompt_tokens)
+            full_prompt_tokens_len = len(prompt_tokens_full)
 
             # Ensure the cached prompt is a real prefix (in token space)
             # of the full prompt; otherwise we cannot safely reuse it.
-            if (
-                len(cache_prompt_tokens) > 1
-                and len(cache_prompt_tokens) <= len(prompt_tokens_full)
-                and prompt_tokens_full[: len(cache_prompt_tokens)] == cache_prompt_tokens
-            ):
-                cached_token_count = len(cache_prompt_tokens) - 1
+            prefix_len_ok = 1 < cache_prompt_tokens_len <= full_prompt_tokens_len
+            prefix_tokens_match = (
+                prefix_len_ok
+                and prompt_tokens_full[:cache_prompt_tokens_len] == cache_prompt_tokens
+            )
+
+            if prefix_len_ok and prefix_tokens_match:
+                cached_token_count = cache_prompt_tokens_len - 1
 
                 # We must still send at least one token.
                 if cached_token_count < len(prompt_tokens_full):
                     prompt_tokens = prompt_tokens_full[cached_token_count:]
                     prompt_cache_for_generator = cache
+            else:
+                # Extra debug to understand why the cache is unusable.
+                logger.debug(
+                    "add_to_batch: prefix cache unusable for %s; "
+                    "cache_prompt_tokens_len=%d, full_prompt_tokens_len=%d, "
+                    "prefix_len_ok=%s, prefix_tokens_match=%s, "
+                    "cache_prompt_snippet=%r, full_prompt_snippet=%r",
+                    prompt_id,
+                    cache_prompt_tokens_len,
+                    full_prompt_tokens_len,
+                    prefix_len_ok,
+                    prefix_tokens_match,
+                    cache_prompt if cache_prompt is not None else None,
+                    prompt,
+                )
 
-        # We mark a cache hit only when we already have a cache for this
-        # exact prompt string. This way, continuous_batch_generate will
-        # still create and persist a new cache for genuinely new prompts,
-        # even if they reuse a shorter prefix cache.
-        cache_hit = exact_cache_hit
+        # We consider it a cache hit when we can actually reuse a prefix
+        # cache for this generation.
+        cache_hit = prompt_cache_for_generator is not None
+
+        # Detailed logging for cache usage decisions.
+        if prompt_cache_for_generator is not None:
+            logger.debug(
+                "add_to_batch: using prefix cache for %s "
+                "(cache_prompt_tokens=%s, suffix_tokens=%d)",
+                prompt_id,
+                cache_prompt_tokens_len,
+                len(prompt_tokens),
+            )
+        elif cache is not None:
+            logger.debug(
+                "add_to_batch: found cache for a messages prefix but "
+                "could not safely reuse it for %s (likely token "
+                "prefix mismatch or too short); falling back to full prompt",
+                prompt_id,
+            )
+        else:
+            logger.debug(
+                "add_to_batch: no prompt cache available for %s; using full prompt",
+                prompt_id,
+            )
 
         # Initialize tracking
         self.active_generations[prompt_id] = {
@@ -364,68 +402,9 @@ class Server:
                                 if r.finish_reason is not None:
                                     gen_data["completed"] = True
                                     gen_data["finish_reason"] = r.finish_reason
-                                    # Persist prompt cache for this prompt if we did not
-                                    # have one yet, and precompute the cache for the
-                                    # next turn (assistant response appended) entirely
-                                    # on this background thread.
-                                    original_body = gen_data.get("messages_body")
-                                    prompt_text = gen_data.get("prompt", "")
-
-                                    try:
-                                        # Cache for the current prompt (if missing).
-                                        if (
-                                            prompt_text
-                                            and not gen_data.get("prompt_cache_hit")
-                                            and self.prompt_cache_manager.load_cache(
-                                                prompt_text
-                                            )
-                                            is None
-                                        ):
-                                            self._build_and_save_prompt_cache(
-                                                prompt_text
-                                            )
-
-                                        # Cache for the extended "next turn" prompt,
-                                        # built by appending this assistant response.
-                                        if original_body is not None:
-                                            generated_text = self.tokenizer.decode(
-                                                gen_data["tokens"]
-                                            )
-                                            tmp_response = (
-                                                self.create_messages_response(
-                                                    generated_text,
-                                                    gen_data["input_tokens"],
-                                                    len(gen_data["tokens"]),
-                                                    gen_data["finish_reason"],
-                                                )
-                                            )
-                                            extended_body = (
-                                                self.prompt_cache_manager.build_body_with_response(
-                                                    original_body,
-                                                    tmp_response,
-                                                )
-                                            )
-                                            if extended_body is not None:
-                                                extended_prompt = (
-                                                    self.chat_template(
-                                                        extended_body,
-                                                        tokenize=False,
-                                                    )
-                                                )
-                                                if (
-                                                    self.prompt_cache_manager.load_cache(
-                                                        extended_prompt
-                                                    )
-                                                    is None
-                                                ):
-                                                    self._build_and_save_prompt_cache(
-                                                        extended_prompt
-                                                    )
-                                    except Exception:
-                                        logger.exception(
-                                            "Failed to build prompt cache for %s",
-                                            prompt_id,
-                                        )
+                                    # Handle prompt cache updates for this completed
+                                    # generation on the background thread.
+                                    self._on_generation_complete(prompt_id, gen_data)
                                     logger.info(
                                         "Completed generation for %s (reason: %s)",
                                         prompt_id,
@@ -438,6 +417,129 @@ class Server:
                     time.sleep(0.01)
 
         logger.info("Continuous batch generation loop ended")
+
+    def _on_generation_complete(self, prompt_id: str, gen_data: dict) -> None:
+        """
+        Handle bookkeeping and prompt cache updates when a generation finishes.
+
+        This method runs on the background generation thread inside the
+        wired_limit context, so all model / MLX work it performs is
+        serialized with the rest of generation.
+        """
+        original_body = gen_data.get("messages_body")
+        prompt_text = gen_data.get("prompt", "")
+
+        try:
+            logger.debug(
+                "on_generation_complete: prompt_id=%s, finish_reason=%s, "
+                "input_tokens=%d, output_tokens=%d, prompt_cache_hit=%s",
+                prompt_id,
+                gen_data.get("finish_reason"),
+                gen_data.get("input_tokens"),
+                len(gen_data.get("tokens", [])),
+                gen_data.get("prompt_cache_hit"),
+            )
+
+            # Cache for the current prompt (conversation up to this turn),
+            # using a canonical prompt that does NOT include the assistant
+            # generation stub. This keeps caches stable as the conversation
+            # grows with new user turns.
+            if original_body is not None:
+                base_prompt_for_cache = self.chat_template(
+                    original_body,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                if self.prompt_cache_manager.load_cache(base_prompt_for_cache) is None:
+                    logger.debug(
+                        "on_generation_complete: building base cache for %s "
+                        "(base_prompt_len_chars=%d)",
+                        prompt_id,
+                        len(base_prompt_for_cache),
+                    )
+                    self._build_and_save_prompt_cache(base_prompt_for_cache)
+                else:
+                    logger.debug(
+                        "on_generation_complete: base cache already exists for %s; "
+                        "skipping base cache build",
+                        prompt_id,
+                    )
+            elif prompt_text:
+                # Fallback for non-chat usage: cache the raw prompt string.
+                if self.prompt_cache_manager.load_cache(prompt_text) is None:
+                    logger.debug(
+                        "on_generation_complete: building base cache from raw "
+                        "prompt_text for %s (prompt_len_chars=%d)",
+                        prompt_id,
+                        len(prompt_text),
+                    )
+                    self._build_and_save_prompt_cache(prompt_text)
+                else:
+                    logger.debug(
+                        "on_generation_complete: base cache already exists for %s; "
+                        "skipping base cache build",
+                        prompt_id,
+                    )
+
+            # Cache for the extended "next turn" prompt, built by appending
+            # this assistant response to the original MessagesBody.
+            if original_body is not None:
+                logger.debug(
+                    "on_generation_complete: attempting extended cache build "
+                    "for %s",
+                    prompt_id,
+                )
+                generated_text = self.tokenizer.decode(gen_data["tokens"])
+                tmp_response = self.create_messages_response(
+                    generated_text,
+                    gen_data["input_tokens"],
+                    len(gen_data["tokens"]),
+                    gen_data["finish_reason"],
+                )
+                extended_body = self.prompt_cache_manager.build_body_with_response(
+                    original_body,
+                    tmp_response,
+                )
+                if extended_body is not None:
+                    extended_prompt = self.chat_template(
+                        extended_body,
+                        tokenize=False,
+                        add_generation_prompt=False,
+                    )
+                    if (
+                        self.prompt_cache_manager.load_cache(extended_prompt)
+                        is None
+                    ):
+                        logger.debug(
+                            "on_generation_complete: building extended cache "
+                            "for %s (extended_prompt_len_chars=%d)",
+                            prompt_id,
+                            len(extended_prompt),
+                        )
+                        self._build_and_save_prompt_cache(extended_prompt)
+                    else:
+                        logger.debug(
+                            "on_generation_complete: extended cache already "
+                            "exists for %s; skipping extended cache build",
+                            prompt_id,
+                        )
+                else:
+                    logger.debug(
+                        "on_generation_complete: extended body is None for %s; "
+                        "skipping extended cache build",
+                        prompt_id,
+                    )
+            else:
+                logger.debug(
+                    "on_generation_complete: no original messages_body stored "
+                    "for %s; skipping extended cache build",
+                    prompt_id,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to build prompt cache for %s",
+                prompt_id,
+            )
 
     def _build_and_save_prompt_cache(self, prompt_text: str) -> None:
         """
@@ -452,6 +554,13 @@ class Server:
             return
 
         prefix_tokens = prompt_tokens[:-1]
+        logger.debug(
+            "_build_and_save_prompt_cache: prompt_len_tokens=%d, "
+            "prefix_len_tokens=%d, max_kv_size=%d",
+            len(prompt_tokens),
+            len(prefix_tokens),
+            self.max_kv_size,
+        )
         cache = cache_mod.make_prompt_cache(
             self.model,
             max_kv_size=self.max_kv_size,
