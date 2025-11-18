@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Union, Optional
 
-from pydantic import BaseModel, Field, Discriminator
-from typing import Annotated
+from pydantic import BaseModel, Field
 
 
 class Usage(BaseModel):
@@ -142,7 +141,10 @@ class InputToolResultMessage(BaseModel):
 
 
 class InputTextOrImageMessage(BaseModel):
-    type: Literal["text", "image"]
+    # Default to "text" so callers don't need to provide a top-level
+    # type field for normal text messages. This matches typical usage
+    # where clients send {"role": "...", "content": ...}.
+    type: Literal["text", "image"] = "text"
     role: Literal["user", "assistant", "system"]
     content: str | list[dict[str, Any]] | None = None
     source: Source | None = None
@@ -195,7 +197,10 @@ class ToolChoice(BaseModel):
 
 class MessagesBody(BaseModel):
     model: str
-    messages: list[Annotated[InputTextOrImageMessage | InputToolUseMessage | InputToolCallMessage | InputToolResultMessage, Field(discriminator='type')]]
+    # Accept both plain text/image messages and tool-related messages.
+    # We intentionally do not use a discriminated union here so that
+    # callers can omit the top-level "type" field for normal text messages.
+    messages: list[InputTextOrImageMessage | InputToolUseMessage | InputToolCallMessage | InputToolResultMessage]
     tools: list[ToolType] | None = None
     max_tokens: int = 16000
     stop_sequence: list[str] | None = None
