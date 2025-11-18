@@ -10,7 +10,14 @@ class Qwen3MoeParser(BaseTokenParser):
     """
     Token parser for Qwen3 MoE models.
 
-    Format: <tool_call>{"name": "function_name", "arguments": {...}}</tool_call>
+    Format: 
+    <tool_call>
+    <function=function_name>
+    <parameter=param_name>
+    value
+    </parameter>
+    </function>
+    </tool_call>
     """
 
     def __init__(self):
@@ -18,6 +25,8 @@ class Qwen3MoeParser(BaseTokenParser):
         self.tool_call_open_tag = "<tool_call>"
         self.tool_call_close_tag = "</tool_call>"
         self.tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
+        self.function_pattern = r"<function=([^>]+)>(.*?)</function>"
+        self.parameter_pattern = r"<parameter=([^>]+)>(.*?)</parameter>"
 
     def parse_tool_calls(
             self,
@@ -50,18 +59,48 @@ class Qwen3MoeParser(BaseTokenParser):
             if text_before:
                 content.append(OutputTextContentItem(type="text", text=text_before))
 
-            # Parse tool call JSON
+            # Parse tool call with XML-like format
             try:
-                raw_tool_json = match.group(1)
-                tool_data = json.loads(raw_tool_json)
-                content.append(OutputToolContentItem(
-                    id=make_tool_call_id(raw_tool_json),
-                    name=tool_data.get("name", ""),
-                    input=tool_data.get("arguments", {})
-                ))
-                logger.debug(f"Parsed tool call: {tool_data.get('name')}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse tool call JSON: {e}")
+                tool_content = match.group(1).strip()
+                
+                # Extract function name and parameters
+                function_match = re.search(self.function_pattern, tool_content, re.DOTALL)
+                if function_match:
+                    function_name = function_match.group(1)
+                    function_content = function_match.group(2)
+                    
+                    # Extract parameters
+                    parameters = {}
+                    param_matches = re.finditer(self.parameter_pattern, function_content, re.DOTALL)
+                    for param_match in param_matches:
+                        param_name = param_match.group(1)
+                        param_value = param_match.group(2).strip()
+                        
+                        # Try to parse as JSON if it looks like JSON
+                        if (param_value.startswith('{') and param_value.endswith('}')) or \
+                           (param_value.startswith('[') and param_value.endswith(']')):
+                            try:
+                                param_value = json.loads(param_value)
+                            except json.JSONDecodeError:
+                                # Keep as string if JSON parsing fails
+                                pass
+                        
+                        parameters[param_name] = param_value
+                    
+                    content.append(OutputToolContentItem(
+                        id=make_tool_call_id(tool_content),
+                        name=function_name,
+                        input=parameters
+                    ))
+                    logger.debug(f"Parsed tool call: {function_name}")
+                else:
+                    # If no function tag found, log error and add as text
+                    logger.error(f"No function tag found in tool call")
+                    logger.error(f"Raw tool call content: {tool_content}")
+                    content.append(OutputTextContentItem(type="text", text=match.group(0)))
+                    
+            except Exception as e:
+                logger.error(f"Failed to parse tool call: {e}")
                 logger.error(f"Raw tool call content: {match.group(1)}")
                 # Add as text if parsing fails
                 content.append(OutputTextContentItem(type="text", text=match.group(0)))

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Union, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, Discriminator
+from typing import Annotated
 
 
 class Usage(BaseModel):
@@ -82,6 +83,45 @@ class InputToolUseMessage(BaseModel):
         }
 
 
+class InputToolCallMessage(BaseModel):
+    """OpenAI-style tool call message that maps to Anthropic's tool_use"""
+    type: Literal["tool_call"]
+    id: str
+    name: str
+    arguments: dict | str  # Can be either dict or JSON string
+    
+    def get_anthropic_compatible(self) -> InputToolUseMessage:
+        """Convert OpenAI tool_call to Anthropic tool_use format"""
+        # Handle arguments that might be JSON strings
+        input_data = self.arguments
+        if isinstance(self.arguments, str):
+            input_data = json.loads(self.arguments)
+            
+        return InputToolUseMessage(
+            type="tool_use",
+            id=self.id,
+            name=self.name,
+            input=input_data
+        )
+    
+    def get_openai_compatible(self) -> dict[str, Any]:
+        """Return OpenAI-compatible format (already in correct format)"""
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": self.id,
+                    "type": "function",
+                    "function": {
+                        "name": self.name,
+                        "arguments": json.dumps(self.arguments) if isinstance(self.arguments, dict) else self.arguments
+                    }
+                }
+            ]
+        }
+
+
 class InputToolResultMessage(BaseModel):
     type: Literal["tool_result"]
     tool_use_id: str
@@ -102,10 +142,10 @@ class InputToolResultMessage(BaseModel):
 
 
 class InputTextOrImageMessage(BaseModel):
+    type: Literal["text", "image"]
     role: Literal["user", "assistant", "system"]
     content: str | list[dict[str, Any]] | None = None
     source: Source | None = None
-    type: Literal["text", "image"] = "text"
 
     def get_openai_compatible(self) -> dict[str, Any]:
         """Convert Anthropic text/image message to OpenAI format"""
@@ -155,7 +195,7 @@ class ToolChoice(BaseModel):
 
 class MessagesBody(BaseModel):
     model: str
-    messages: list[Union[InputTextOrImageMessage |InputToolUseMessage | InputToolResultMessage]]
+    messages: list[Annotated[InputTextOrImageMessage | InputToolUseMessage | InputToolCallMessage | InputToolResultMessage, Field(discriminator='type')]]
     tools: list[ToolType] | None = None
     max_tokens: int = 16000
     stop_sequence: list[str] | None = None
@@ -167,7 +207,14 @@ class MessagesBody(BaseModel):
 
     def get_openai_compatible_messages(self) -> list[dict[str, Any]]:
         """Convert all messages to OpenAI-compatible format"""
-        return [msg.get_openai_compatible() for msg in self.messages]
+        result = []
+        for msg in self.messages:
+            if isinstance(msg, InputToolCallMessage):
+                # Tool call messages are already in OpenAI format, convert to tool_use for processing
+                result.append(msg.get_anthropic_compatible().get_openai_compatible())
+            else:
+                result.append(msg.get_openai_compatible())
+        return result
 
     def get_openai_compatible_tools(self) -> list[dict[str, Any]] | None:
         """Convert all tools to OpenAI-compatible format"""
