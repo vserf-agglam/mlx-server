@@ -300,9 +300,8 @@ async def stream_response(request: MessagesBody):
             build_message_start_event(f"msg_stream_{request.model}", request.model, input_tokens)
         )
 
-        # Send initial content_block_start event for text
-        yield build_sse_event("content_block_start", build_content_block_start_event(index=current_block_index))
-        current_block_type = "text"
+        # Don't open a block yet - wait for first event to determine type
+        # current_block_type is already None (set on line 290)
         last_event_time = time.time()
 
         # Stream the actual content
@@ -323,6 +322,11 @@ async def stream_response(request: MessagesBody):
                 if isinstance(chunk, dict) and "delta" in chunk:
                     text_chunk = chunk["delta"]
                     if not use_tools:
+                        # Open text block if not already open
+                        if current_block_type is None:
+                            yield build_sse_event("content_block_start", build_content_block_start_event(index=current_block_index))
+                            current_block_type = "text"
+
                         if text_chunk:
                             yield build_sse_event("content_block_delta", build_text_delta_event(text_chunk, index=current_block_index))
                             last_event_time = time.time()
