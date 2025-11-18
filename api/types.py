@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, Optional
 
 from pydantic import BaseModel, Field
 
@@ -30,13 +30,13 @@ class InputSchema(BaseModel):
 
 class OpenaiCompitableToolType(BaseModel):
     name: str
-    description: str | None
+    description: Optional[str] = None
     properties: InputSchema
 
 
 class ToolType(BaseModel):
     name: str
-    description: str | None
+    description:Optional[str] = None
     input_schema: InputSchema
 
     def get_openai_compitable(self) -> dict[str, Any]:
