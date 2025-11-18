@@ -19,18 +19,11 @@ def mock_global_server(mock_server):
         yield mock_server
 
 
-@pytest.fixture
-async def stream_response_func():
-    """Import stream_response after mocking."""
-    from app import stream_response
-    return stream_response
-
-
 class TestStreamResponseBasic:
     """Basic stream_response tests."""
 
     @pytest.mark.asyncio
-    async def test_basic_text_stream(self, stream_response_func, sample_messages_body, sample_final_response):
+    async def test_basic_text_stream(self, sample_messages_body, sample_final_response):
         """Test basic text streaming without tools."""
         # Mock server to yield simple text chunks
         mock_server = Mock()
@@ -71,7 +64,7 @@ class TestStreamResponseBasic:
             assert "message_stop" in event_types
 
     @pytest.mark.asyncio
-    async def test_event_order(self, stream_response_func, sample_messages_body, sample_final_response):
+    async def test_event_order(self, sample_messages_body, sample_final_response):
         """Test events are in correct order."""
         mock_server = Mock()
         mock_server.count_input_tokens = Mock(return_value=50)
