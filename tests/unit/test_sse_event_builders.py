@@ -10,7 +10,9 @@ import json
 from utils.sse_event_builders import (
     build_sse_event,
     build_text_delta_event,
-    build_tool_call_event,
+    build_input_json_delta_event,
+    build_tool_use_block_start_event,
+    build_ping_event,
     build_message_start_event,
     build_content_block_start_event,
     build_content_block_stop_event,
@@ -107,46 +109,89 @@ class TestBuildTextDeltaEvent:
         assert result["delta"]["text"] == text
 
 
-class TestBuildToolCallEvent:
-    """Tests for build_tool_call_event function."""
+class TestBuildInputJsonDeltaEvent:
+    """Tests for build_input_json_delta_event function."""
 
-    def test_basic_tool_call(self):
-        """Test basic tool call event."""
-        result = build_tool_call_event(
-            "toolu_123",
-            "get_weather",
-            {"location": "NYC"}
-        )
+    def test_basic_json_delta(self):
+        """Test basic input JSON delta event."""
+        result = build_input_json_delta_event('{"location": "San', index=1)
         assert result == {
-            "type": "tool_call",
-            "id": "toolu_123",
-            "name": "get_weather",
-            "arguments": {"location": "NYC"}
-        }
-
-    def test_empty_arguments(self):
-        """Test tool call with empty arguments."""
-        result = build_tool_call_event("toolu_456", "ping", {})
-        assert result["arguments"] == {}
-
-    def test_complex_arguments(self):
-        """Test tool call with nested arguments."""
-        args = {
-            "location": "NYC",
-            "units": "celsius",
-            "details": {
-                "forecast": True,
-                "days": 7
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": '{"location": "San'
             }
         }
-        result = build_tool_call_event("toolu_789", "weather", args)
-        assert result["arguments"] == args
 
-    def test_unicode_in_arguments(self):
-        """Test tool call with unicode in arguments."""
-        args = {"city": "東京", "query": "天気"}
-        result = build_tool_call_event("toolu_abc", "search", args)
-        assert result["arguments"]["city"] == "東京"
+    def test_default_index(self):
+        """Test with default index."""
+        result = build_input_json_delta_event('{"key": ')
+        assert result["index"] == 0
+
+    def test_complete_json_field(self):
+        """Test with complete JSON field value."""
+        result = build_input_json_delta_event('"San Francisco, CA"', index=2)
+        assert result["delta"]["partial_json"] == '"San Francisco, CA"'
+
+    def test_empty_json(self):
+        """Test with empty JSON string."""
+        result = build_input_json_delta_event('', index=1)
+        assert result["delta"]["partial_json"] == ''
+
+    def test_unicode_in_json(self):
+        """Test with unicode characters in JSON."""
+        result = build_input_json_delta_event('{"city": "東京"}', index=1)
+        assert result["delta"]["partial_json"] == '{"city": "東京"}'
+
+
+class TestBuildToolUseBlockStartEvent:
+    """Tests for build_tool_use_block_start_event function."""
+
+    def test_basic_tool_use_start(self):
+        """Test basic tool_use block start event."""
+        result = build_tool_use_block_start_event(1, "toolu_123", "get_weather")
+        assert result == {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_123",
+                "name": "get_weather",
+                "input": {}
+            }
+        }
+
+    def test_different_index(self):
+        """Test with different index values."""
+        result = build_tool_use_block_start_event(5, "toolu_abc", "search")
+        assert result["index"] == 5
+        assert result["content_block"]["id"] == "toolu_abc"
+        assert result["content_block"]["name"] == "search"
+
+    def test_empty_input(self):
+        """Test that input starts empty."""
+        result = build_tool_use_block_start_event(0, "toolu_1", "test")
+        assert result["content_block"]["input"] == {}
+
+    def test_unicode_tool_name(self):
+        """Test with unicode in tool name."""
+        result = build_tool_use_block_start_event(1, "toolu_x", "検索")
+        assert result["content_block"]["name"] == "検索"
+
+
+class TestBuildPingEvent:
+    """Tests for build_ping_event function."""
+
+    def test_ping_event(self):
+        """Test ping event structure."""
+        result = build_ping_event()
+        assert result == {"type": "ping"}
+
+    def test_ping_event_in_sse(self):
+        """Test ping event in SSE format."""
+        sse = build_sse_event("ping", build_ping_event())
+        assert sse == 'event: ping\ndata: {"type": "ping"}\n\n'
 
 
 class TestBuildMessageStartEvent:
@@ -198,10 +243,6 @@ class TestBuildContentBlockStartEvent:
         result = build_content_block_start_event(index=3)
         assert result["index"] == 3
 
-    def test_custom_block_type(self):
-        """Test with custom block type."""
-        result = build_content_block_start_event(block_type="code")
-        assert result["content_block"]["type"] == "code"
 
 
 class TestBuildContentBlockStopEvent:
@@ -312,7 +353,7 @@ class TestIntegration:
     """Integration tests combining multiple builders."""
 
     def test_full_sse_stream_sequence(self):
-        """Test a complete SSE event sequence."""
+        """Test a complete SSE event sequence with Anthropic-compatible format."""
         # message_start
         msg_start = build_sse_event(
             "message_start",
@@ -320,38 +361,60 @@ class TestIntegration:
         )
         assert "event: message_start" in msg_start
 
-        # content_block_start
-        block_start = build_sse_event(
+        # content_block_start for text
+        text_block_start = build_sse_event(
             "content_block_start",
-            build_content_block_start_event()
+            build_content_block_start_event(index=0)
         )
-        assert "event: content_block_start" in block_start
+        assert "event: content_block_start" in text_block_start
+        assert '"type": "text"' in text_block_start
 
-        # content_block_delta
-        delta = build_sse_event(
+        # content_block_delta for text
+        text_delta = build_sse_event(
             "content_block_delta",
-            build_text_delta_event("Hello")
+            build_text_delta_event("Hello", index=0)
         )
-        assert "event: content_block_delta" in delta
+        assert "event: content_block_delta" in text_delta
+        assert '"text_delta"' in text_delta
 
-        # tool_call
-        tool = build_sse_event(
-            "tool_call",
-            build_tool_call_event("toolu_1", "test", {})
-        )
-        assert "event: tool_call" in tool
-
-        # content_block_stop
-        block_stop = build_sse_event(
+        # content_block_stop for text
+        text_block_stop = build_sse_event(
             "content_block_stop",
-            build_content_block_stop_event()
+            build_content_block_stop_event(index=0)
         )
-        assert "event: content_block_stop" in block_stop
+        assert "event: content_block_stop" in text_block_stop
+
+        # content_block_start for tool_use
+        tool_block_start = build_sse_event(
+            "content_block_start",
+            build_tool_use_block_start_event(1, "toolu_123", "get_weather")
+        )
+        assert "event: content_block_start" in tool_block_start
+        assert '"type": "tool_use"' in tool_block_start
+
+        # content_block_delta for tool input JSON
+        json_delta = build_sse_event(
+            "content_block_delta",
+            build_input_json_delta_event('{"location": "San Francisco"}', index=1)
+        )
+        assert "event: content_block_delta" in json_delta
+        assert '"input_json_delta"' in json_delta
+
+        # content_block_stop for tool
+        tool_block_stop = build_sse_event(
+            "content_block_stop",
+            build_content_block_stop_event(index=1)
+        )
+        assert "event: content_block_stop" in tool_block_stop
+
+        # ping event
+        ping = build_sse_event("ping", build_ping_event())
+        assert "event: ping" in ping
 
         # message_delta
         msg_delta = build_sse_event(
             "message_delta",
-            build_message_delta_event("end_turn", None, 10, 5)
+            build_message_delta_event("tool_use", None, 10, 25)
         )
         assert "event: message_delta" in msg_delta
 

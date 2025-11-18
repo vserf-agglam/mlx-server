@@ -56,32 +56,69 @@ def build_text_delta_event(text: str, index: int = 0) -> dict[str, Any]:
     }
 
 
-def build_tool_call_event(id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def build_input_json_delta_event(partial_json: str, index: int = 0) -> dict[str, Any]:
     """
-    Build a tool_call event.
+    Build a content_block_delta event with input_json_delta for tool input streaming.
 
     Args:
-        id: The tool call ID
-        name: The name of the tool being called
-        arguments: The tool call arguments
+        partial_json: The partial JSON string chunk to include in the delta
+        index: The content block index (default: 0)
 
     Returns:
-        Dictionary representing a tool_call event
+        Dictionary representing a content_block_delta event with input_json_delta
 
     Example:
-        >>> build_tool_call_event("toolu_123", "get_weather", {"location": "NYC"})
+        >>> build_input_json_delta_event('{"location": "San', 1)
         {
-            "type": "tool_call",
-            "id": "toolu_123",
-            "name": "get_weather",
-            "arguments": {"location": "NYC"}
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"location": "San'}
         }
     """
     return {
-        "type": "tool_call",
-        "id": id,
-        "name": name,
-        "arguments": arguments
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": partial_json
+        }
+    }
+
+
+def build_tool_use_block_start_event(index: int, tool_id: str, tool_name: str) -> dict[str, Any]:
+    """
+    Build a content_block_start event for tool_use content blocks.
+
+    Args:
+        index: The content block index
+        tool_id: The tool call ID (e.g., "toolu_01A09q90qw90lq917835lq9")
+        tool_name: The name of the tool being called
+
+    Returns:
+        Dictionary representing a content_block_start event with tool_use type
+
+    Example:
+        >>> build_tool_use_block_start_event(1, "toolu_123", "get_weather")
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_123",
+                "name": "get_weather",
+                "input": {}
+            }
+        }
+    """
+    return {
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {
+            "type": "tool_use",
+            "id": tool_id,
+            "name": tool_name,
+            "input": {}
+        }
     }
 
 
@@ -131,16 +168,17 @@ def build_message_start_event(message_id: str, model: str, input_tokens: int) ->
     }
 
 
-def build_content_block_start_event(index: int = 0, block_type: str = "text") -> dict[str, Any]:
+def build_content_block_start_event(index: int = 0) -> dict[str, Any]:
     """
-    Build a content_block_start event.
+    Build a content_block_start event for text content blocks.
+
+    For tool_use content blocks, use build_tool_use_block_start_event() instead.
 
     Args:
         index: The content block index (default: 0)
-        block_type: The type of content block (default: "text")
 
     Returns:
-        Dictionary representing a content_block_start event
+        Dictionary representing a content_block_start event for text
 
     Example:
         >>> build_content_block_start_event()
@@ -154,7 +192,7 @@ def build_content_block_start_event(index: int = 0, block_type: str = "text") ->
         "type": "content_block_start",
         "index": index,
         "content_block": {
-            "type": block_type,
+            "type": "text",
             "text": ""
         }
     }
@@ -231,6 +269,20 @@ def build_message_stop_event() -> dict[str, Any]:
         {"type": "message_stop"}
     """
     return {"type": "message_stop"}
+
+
+def build_ping_event() -> dict[str, Any]:
+    """
+    Build a ping event for keeping SSE connections alive during long-running streams.
+
+    Returns:
+        Dictionary representing a ping event
+
+    Example:
+        >>> build_ping_event()
+        {"type": "ping"}
+    """
+    return {"type": "ping"}
 
 
 def build_error_event(error_type: str, message: str) -> dict[str, Any]:

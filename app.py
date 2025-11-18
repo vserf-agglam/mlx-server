@@ -23,7 +23,9 @@ from api.server import Server
 from utils.sse_event_builders import (
     build_sse_event,
     build_text_delta_event,
-    build_tool_call_event,
+    build_input_json_delta_event,
+    build_tool_use_block_start_event,
+    build_ping_event,
     build_message_start_event,
     build_content_block_start_event,
     build_content_block_stop_event,
@@ -270,8 +272,9 @@ def create_app() -> FastAPI:
 async def stream_response(request: MessagesBody):
     """
     Stream response generator for Server-Sent Events (SSE).
-    Follows Anthropic's streaming format.
+    Follows Anthropic's streaming format with full multi-block content support.
     """
+    import time
     global server
     input_tokens = server.count_input_tokens(request)
 
@@ -284,6 +287,12 @@ async def stream_response(request: MessagesBody):
         enable_tools=use_tools,
     )
 
+    # Track content block indices and state
+    current_block_index = 0
+    current_block_type: str | None = None  # "text" or "tool_use"
+    last_event_time = time.time()
+    PING_INTERVAL = 15.0  # Send ping every 15 seconds
+
     try:
         # Send message_start event
         yield build_sse_event(
@@ -291,8 +300,10 @@ async def stream_response(request: MessagesBody):
             build_message_start_event(f"msg_stream_{request.model}", request.model, input_tokens)
         )
 
-        # Send content_block_start event
-        yield build_sse_event("content_block_start", build_content_block_start_event())
+        # Send initial content_block_start event for text
+        yield build_sse_event("content_block_start", build_content_block_start_event(index=current_block_index))
+        current_block_type = "text"
+        last_event_time = time.time()
 
         # Stream the actual content
         generator = server.generate_stream(request, timeout=300.0)
@@ -302,23 +313,63 @@ async def stream_response(request: MessagesBody):
             while True:
                 chunk = next(generator)
 
+                # Check if we should send a ping event
+                current_time = time.time()
+                if current_time - last_event_time > PING_INTERVAL:
+                    yield build_sse_event("ping", build_ping_event())
+                    last_event_time = current_time
+
                 # Model token chunk.
                 if isinstance(chunk, dict) and "delta" in chunk:
                     text_chunk = chunk["delta"]
                     if not use_tools:
                         if text_chunk:
-                            yield build_sse_event("content_block_delta", build_text_delta_event(text_chunk))
+                            yield build_sse_event("content_block_delta", build_text_delta_event(text_chunk, index=current_block_index))
+                            last_event_time = time.time()
                         continue
 
-                    # Tool-aware path: split text into plain text and tool calls.
+                    # Tool-aware path: handle text deltas and tool blocks
                     events = tool_helper.feed(text_chunk)
                     for ev in events:
                         kind = ev.get("kind")
+
                         if kind == "text_delta":
+                            # Ensure we're in a text block
+                            if current_block_type != "text":
+                                # Close previous tool block if exists
+                                if current_block_type == "tool_use":
+                                    yield build_sse_event("content_block_stop", build_content_block_stop_event(index=current_block_index))
+                                    current_block_index += 1
+                                # Open new text block
+                                yield build_sse_event("content_block_start", build_content_block_start_event(index=current_block_index))
+                                current_block_type = "text"
+
                             if ev.get("text"):
-                                yield build_sse_event("content_block_delta", build_text_delta_event(ev["text"]))
-                        elif kind == "tool_call":
-                            yield build_sse_event("tool_call", build_tool_call_event(ev["id"], ev["name"], ev["arguments"]))
+                                yield build_sse_event("content_block_delta", build_text_delta_event(ev["text"], index=current_block_index))
+                                last_event_time = time.time()
+
+                        elif kind == "tool_start":
+                            # Close current block (text or previous tool)
+                            if current_block_type is not None:
+                                yield build_sse_event("content_block_stop", build_content_block_stop_event(index=current_block_index))
+                                current_block_index += 1
+
+                            # Open new tool_use block
+                            yield build_sse_event("content_block_start",
+                                build_tool_use_block_start_event(current_block_index, ev["id"], ev["name"]))
+                            current_block_type = "tool_use"
+                            last_event_time = time.time()
+
+                        elif kind == "input_json_delta":
+                            # Stream tool input JSON
+                            if ev.get("partial_json"):
+                                yield build_sse_event("content_block_delta",
+                                    build_input_json_delta_event(ev["partial_json"], index=current_block_index))
+                                last_event_time = time.time()
+
+                        elif kind == "tool_stop":
+                            # Tool block will be closed automatically, just track it
+                            pass
 
                     continue
 
@@ -335,14 +386,39 @@ async def stream_response(request: MessagesBody):
             if use_tools:
                 for ev in tool_helper.flush():
                     kind = ev.get("kind")
-                    if kind == "text_delta":
-                        if ev.get("text"):
-                            yield build_sse_event("content_block_delta", build_text_delta_event(ev["text"]))
-                    elif kind == "tool_call":
-                        yield build_sse_event("tool_call", build_tool_call_event(ev["id"], ev["name"], ev["arguments"]))
 
-            # Send content_block_stop event
-            yield build_sse_event("content_block_stop", build_content_block_stop_event())
+                    if kind == "text_delta":
+                        # Ensure we're in a text block
+                        if current_block_type != "text":
+                            if current_block_type == "tool_use":
+                                yield build_sse_event("content_block_stop", build_content_block_stop_event(index=current_block_index))
+                                current_block_index += 1
+                            yield build_sse_event("content_block_start", build_content_block_start_event(index=current_block_index))
+                            current_block_type = "text"
+
+                        if ev.get("text"):
+                            yield build_sse_event("content_block_delta", build_text_delta_event(ev["text"], index=current_block_index))
+
+                    elif kind == "tool_start":
+                        if current_block_type is not None:
+                            yield build_sse_event("content_block_stop", build_content_block_stop_event(index=current_block_index))
+                            current_block_index += 1
+
+                        yield build_sse_event("content_block_start",
+                            build_tool_use_block_start_event(current_block_index, ev["id"], ev["name"]))
+                        current_block_type = "tool_use"
+
+                    elif kind == "input_json_delta":
+                        if ev.get("partial_json"):
+                            yield build_sse_event("content_block_delta",
+                                build_input_json_delta_event(ev["partial_json"], index=current_block_index))
+
+                    elif kind == "tool_stop":
+                        pass
+
+            # Send final content_block_stop event for the last block
+            if current_block_type is not None:
+                yield build_sse_event("content_block_stop", build_content_block_stop_event(index=current_block_index))
 
             # Send message_delta event
             yield build_sse_event(

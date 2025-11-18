@@ -113,15 +113,23 @@ class Server:
         if finish_reason == "length":
             stop_reason = "max_tokens"
 
+        # Check if content contains tool calls and set stop_reason to "tool_use"
+        from api.types import OutputToolContentItem
+        if any(isinstance(item, OutputToolContentItem) for item in content):
+            stop_reason = "tool_use"
+
         return MessagesResponse(
             id=f"msg_{uuid4().hex}",
             type="message",
             role="assistant",
+            model=self.model_name,
             content=content,
             stop_reason=stop_reason,
             stop_sequence=None,
             usage=Usage(
                 input_tokens=input_tokens,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
                 output_tokens=output_tokens
             )
         )

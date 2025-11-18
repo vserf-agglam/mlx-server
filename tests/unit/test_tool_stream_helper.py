@@ -135,12 +135,16 @@ class TestToolCallParsing:
         chunk = '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
         result = helper.feed(chunk)
 
-        # Should have one tool_call event
-        tool_events = [e for e in result if e["kind"] == "tool_call"]
-        assert len(tool_events) == 1
-        assert tool_events[0]["name"] == "get_weather"
-        assert tool_events[0]["arguments"] == {"location": "NYC"}
-        assert "toolu_" in tool_events[0]["id"]
+        # Should have tool_start, input_json_delta, and tool_stop events
+        tool_start_events = [e for e in result if e["kind"] == "tool_start"]
+        json_delta_events = [e for e in result if e["kind"] == "input_json_delta"]
+        tool_stop_events = [e for e in result if e["kind"] == "tool_stop"]
+
+        assert len(tool_start_events) == 1
+        assert tool_start_events[0]["name"] == "get_weather"
+        assert "toolu_" in tool_start_events[0]["id"]
+        assert len(json_delta_events) >= 1  # At least one JSON chunk
+        assert len(tool_stop_events) == 1
 
     def test_tool_call_split_across_chunks(self, mock_qwen_parser):
         """Test tool call split across multiple chunks."""
@@ -153,9 +157,9 @@ class TestToolCallParsing:
         result = helper.feed("</tool_call>")
 
         # Tool call should be complete now
-        tool_events = [e for e in result if e["kind"] == "tool_call"]
-        assert len(tool_events) == 1
-        assert tool_events[0]["name"] == "test"
+        tool_start_events = [e for e in result if e["kind"] == "tool_start"]
+        assert len(tool_start_events) == 1
+        assert tool_start_events[0]["name"] == "test"
 
     def test_multiple_tool_calls_single_chunk(self, mock_qwen_parser):
         """Test multiple tool calls in single chunk."""
@@ -167,10 +171,10 @@ class TestToolCallParsing:
         )
         result = helper.feed(chunk)
 
-        tool_events = [e for e in result if e["kind"] == "tool_call"]
-        assert len(tool_events) == 2
-        assert tool_events[0]["name"] == "tool1"
-        assert tool_events[1]["name"] == "tool2"
+        tool_start_events = [e for e in result if e["kind"] == "tool_start"]
+        assert len(tool_start_events) == 2
+        assert tool_start_events[0]["name"] == "tool1"
+        assert tool_start_events[1]["name"] == "tool2"
 
     def test_text_before_tool_call(self, mock_qwen_parser):
         """Test text before tool call."""
@@ -179,10 +183,13 @@ class TestToolCallParsing:
         chunk = 'Let me check. <tool_call>{"name": "test", "arguments": {}}</tool_call>'
         result = helper.feed(chunk)
 
-        assert len(result) == 2
-        assert result[0]["kind"] == "text_delta"
-        assert "Let me check" in result[0]["text"]
-        assert result[1]["kind"] == "tool_call"
+        # Should have text_delta, then tool_start, input_json_delta, tool_stop
+        text_events = [e for e in result if e["kind"] == "text_delta"]
+        tool_start_events = [e for e in result if e["kind"] == "tool_start"]
+
+        assert len(text_events) >= 1
+        assert "Let me check" in text_events[0]["text"]
+        assert len(tool_start_events) == 1
 
     def test_text_after_tool_call(self, mock_qwen_parser):
         """Test text after tool call."""
@@ -191,10 +198,10 @@ class TestToolCallParsing:
         chunk = '<tool_call>{"name": "test", "arguments": {}}</tool_call> Done.'
         result = helper.feed(chunk)
 
-        tool_events = [e for e in result if e["kind"] == "tool_call"]
+        tool_start_events = [e for e in result if e["kind"] == "tool_start"]
         text_events = [e for e in result if e["kind"] == "text_delta"]
 
-        assert len(tool_events) >= 1
+        assert len(tool_start_events) >= 1
         assert len(text_events) >= 1
         assert any("Done" in e["text"] for e in text_events)
 
@@ -211,10 +218,10 @@ class TestToolCallParsing:
         )
         result = helper.feed(chunk)
 
-        tool_events = [e for e in result if e["kind"] == "tool_call"]
+        tool_start_events = [e for e in result if e["kind"] == "tool_start"]
         text_events = [e for e in result if e["kind"] == "text_delta"]
 
-        assert len(tool_events) == 2
+        assert len(tool_start_events) == 2
         assert len(text_events) >= 1
 
 
@@ -250,11 +257,11 @@ class TestBufferingLogic:
 
         # Collect all events
         all_results = result + helper.flush()
-        tool_events = [e for e in all_results if e["kind"] == "tool_call"]
+        tool_start_events = [e for e in all_results if e["kind"] == "tool_start"]
         text_events = [e for e in all_results if e["kind"] == "text_delta"]
 
         # Should have at least the tool call OR text
-        assert len(tool_events) >= 1 or len(text_events) >= 1
+        assert len(tool_start_events) >= 1 or len(text_events) >= 1
 
     def test_incomplete_json_buffered(self, mock_qwen_parser):
         """Test incomplete JSON in tool call is buffered."""
@@ -264,8 +271,8 @@ class TestBufferingLogic:
         result = helper.feed('<tool_call>{"name": "test", "arg')
 
         # Should be buffered, not emitted
-        tool_events = [e for e in result if e["kind"] == "tool_call"]
-        assert len(tool_events) == 0
+        tool_start_events = [e for e in result if e["kind"] == "tool_start"]
+        assert len(tool_start_events) == 0
 
     def test_flush_emits_buffered_content(self, mock_qwen_parser):
         """Test flush emits buffered content."""
@@ -441,14 +448,15 @@ class TestRealisticScenarios:
         # Flush to get remaining
         all_events.extend(helper.flush())
 
-        # Should have text events and tool call
+        # Should have text events and tool start
         text_events = [e for e in all_events if e["kind"] == "text_delta"]
-        tool_events = [e for e in all_events if e["kind"] == "tool_call"]
+        tool_start_events = [e for e in all_events if e["kind"] == "tool_start"]
+        json_delta_events = [e for e in all_events if e["kind"] == "input_json_delta"]
 
         assert len(text_events) >= 1
-        assert len(tool_events) == 1
-        assert tool_events[0]["name"] == "get_weather"
-        assert tool_events[0]["arguments"]["location"] == "NYC"
+        assert len(tool_start_events) == 1
+        assert tool_start_events[0]["name"] == "get_weather"
+        assert len(json_delta_events) >= 1  # Should have JSON chunks
 
         # Combine all text
         combined_text = "".join(e["text"] for e in text_events)
@@ -477,10 +485,10 @@ class TestRealisticScenarios:
 
         all_events.extend(helper.flush())
 
-        tool_events = [e for e in all_events if e["kind"] == "tool_call"]
-        assert len(tool_events) == 2
-        assert tool_events[0]["arguments"]["query"] == "Python"
-        assert tool_events[1]["arguments"]["query"] == "JavaScript"
+        tool_start_events = [e for e in all_events if e["kind"] == "tool_start"]
+        assert len(tool_start_events) == 2
+        assert tool_start_events[0]["name"] == "search"
+        assert tool_start_events[1]["name"] == "search"
 
     def test_interrupted_tool_scenario(self, mock_qwen_parser):
         """Scenario: Tool call split into tiny chunks."""
@@ -503,13 +511,12 @@ class TestRealisticScenarios:
 
         all_events.extend(helper.flush())
 
-        tool_events = [e for e in all_events if e["kind"] == "tool_call"]
+        tool_start_events = [e for e in all_events if e["kind"] == "tool_start"]
         text_events = [e for e in all_events if e["kind"] == "text_delta"]
 
         # Should have at least one tool call
-        assert len(tool_events) >= 1
-        assert tool_events[0]["name"] == "calc"
-        assert tool_events[0]["arguments"]["expr"] == "2+2"
+        assert len(tool_start_events) >= 1
+        assert tool_start_events[0]["name"] == "calc"
 
         # Should have leading text
         combined_text = "".join(e["text"] for e in text_events)

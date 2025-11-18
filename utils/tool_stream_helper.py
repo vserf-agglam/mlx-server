@@ -146,6 +146,11 @@ class ToolStreamHelper:
         """
         Run the token parser (if enabled) on the given text and map the
         resulting content items to streaming events.
+
+        For tool calls, this now emits a sequence of events:
+        - tool_start: Signals the beginning of a tool block
+        - input_json_delta: Streams the tool input JSON in chunks
+        - tool_stop: Signals the end of a tool block
         """
         events: List[Dict[str, Any]] = []
         if not text:
@@ -161,13 +166,67 @@ class ToolStreamHelper:
                 if item.text:
                     events.append({"kind": "text_delta", "text": item.text})
             elif isinstance(item, OutputToolContentItem):
-                events.append(
-                    {
-                        "kind": "tool_call",
-                        "id": item.id,
-                        "name": item.name,
-                        "arguments": item.input,
-                    }
-                )
+                # Emit tool_start event
+                events.append({
+                    "kind": "tool_start",
+                    "id": item.id,
+                    "name": item.name,
+                })
+
+                # Stream the tool input JSON in chunks (by complete field values)
+                json_chunks = self._chunk_json_by_fields(item.input)
+                for chunk in json_chunks:
+                    events.append({
+                        "kind": "input_json_delta",
+                        "partial_json": chunk,
+                    })
+
+                # Emit tool_stop event
+                events.append({
+                    "kind": "tool_stop",
+                })
 
         return events
+
+    def _chunk_json_by_fields(self, json_obj: dict[str, Any]) -> List[str]:
+        """
+        Chunk a JSON object into partial JSON strings, emitting complete field values.
+
+        This provides a balance between streaming granularity and overhead.
+        For simple objects, this might emit:
+        - '{"location": '
+        - '"San Francisco, CA"'
+        - ', "unit": '
+        - '"celsius"'
+        - '}'
+
+        Args:
+            json_obj: The JSON object to chunk
+
+        Returns:
+            List of partial JSON string chunks
+        """
+        import json
+
+        if not json_obj:
+            return ['{}']
+
+        chunks: List[str] = []
+        chunks.append('{')
+
+        items = list(json_obj.items())
+        for i, (key, value) in enumerate(items):
+            # Add the key
+            chunks.append(f'"{key}": ')
+
+            # Add the value (properly JSON-encoded)
+            value_json = json.dumps(value)
+            chunks.append(value_json)
+
+            # Add comma if not the last item
+            if i < len(items) - 1:
+                chunks.append(', ')
+
+        chunks.append('}')
+
+        return chunks

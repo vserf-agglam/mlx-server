@@ -8,10 +8,13 @@ from pydantic import BaseModel, Field
 
 class Usage(BaseModel):
     input_tokens: int
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
     output_tokens: int
 
 
 class OutputToolContentItem(BaseModel):
+    type: Literal["tool_use"]
     id: str
     name: str
     input: dict
@@ -232,7 +235,8 @@ class MessagesResponse(BaseModel):
     id: str
     type: Literal["message"]
     role: Literal["user", "assistant", "system"]
+    model: str
     content: list[OutputTextContentItem | OutputToolContentItem]
-    stop_reason: Literal["end_turn", "max_tokens"]
+    stop_reason: Literal["end_turn", "max_tokens", "tool_use"]
     stop_sequence: str | None
     usage: Usage

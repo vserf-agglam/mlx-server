@@ -88,6 +88,7 @@ class Qwen3MoeParser(BaseTokenParser):
                         parameters[param_name] = param_value
                     
                     content.append(OutputToolContentItem(
+                        type="tool_use",
                         id=make_tool_call_id(tool_content),
                         name=function_name,
                         input=parameters
