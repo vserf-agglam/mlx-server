@@ -2,7 +2,7 @@ import logging
 import queue
 import time
 import threading
-from typing import Literal, Generator
+from typing import Literal, Generator, Optional
 from uuid import uuid4
 
 import mlx.core as mx
@@ -33,7 +33,7 @@ class Server:
         prefill_batch_size: int = 8,
         completion_batch_size: int = 32,
         trust_remote_code: bool = False,
-        max_kv_size=4096,
+        max_kv_size: Optional[int] = None,
         cache_path: str = "caches"
     ):
         self.loaded = False
@@ -53,7 +53,7 @@ class Server:
         self.trust_remote_code = trust_remote_code
         # Ensure max_kv_size is always an integer; this guards against
         # CLI argument parsing passing a string value through.
-        self.max_kv_size = int(max_kv_size)
+        self.max_kv_size = int(max_kv_size) if max_kv_size is not None else None
         self.cache_path = cache_path
         self.prompt_cache_manager = PromptCacheHelper(cache_path)
 
