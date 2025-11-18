@@ -1,6 +1,9 @@
-from typing import Literal, Any, Union
+from __future__ import annotations
 
-from pydantic import BaseModel
+import json
+from typing import Any, Literal, Union
+
+from pydantic import BaseModel, Field
 
 
 class Usage(BaseModel):
@@ -22,7 +25,7 @@ class OutputTextContentItem(BaseModel):
 class InputSchema(BaseModel):
     type: Literal["object"]
     properties: dict[str, dict[str, str | list | object]]
-    required: list[str]
+    required: list[str] = Field(default_factory=list)
 
 
 class OpenaiCompitableToolType(BaseModel):
@@ -63,7 +66,6 @@ class InputToolUseMessage(BaseModel):
 
     def get_openai_compatible(self) -> dict[str, Any]:
         """Convert Anthropic tool_use to OpenAI tool_calls format"""
-        import json
         return {
             "role": "assistant",
             "content": None,
@@ -87,7 +89,6 @@ class InputToolResultMessage(BaseModel):
 
     def get_openai_compatible(self) -> dict[str, Any]:
         """Convert Anthropic tool_result to OpenAI tool message format"""
-        import json
         # Convert content to string if it's not already
         content_str = self.content
         if isinstance(self.content, (dict, list)):
@@ -102,16 +103,30 @@ class InputToolResultMessage(BaseModel):
 
 class InputTextOrImageMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
-    content: str | None = None
+    content: str | list[dict[str, Any]] | None = None
     source: Source | None = None
     type: Literal["text", "image"] = "text"
 
     def get_openai_compatible(self) -> dict[str, Any]:
         """Convert Anthropic text/image message to OpenAI format"""
         if self.type == "text":
+            content_value: str | None = self.content
+            if isinstance(self.content, list):
+                text_parts: list[str] = []
+                for part in self.content:
+                    if isinstance(part, dict):
+                        text_value = part.get("text")
+                        if isinstance(text_value, str):
+                            text_parts.append(text_value)
+                        else:
+                            text_parts.append(json.dumps(part))
+                    else:
+                        text_parts.append(str(part))
+                content_value = "\n\n".join(text_parts)
+
             return {
                 "role": self.role,
-                "content": self.content
+                "content": content_value
             }
         elif self.type == "image" and self.source:
             # OpenAI format for images
