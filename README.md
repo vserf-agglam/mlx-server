@@ -48,9 +48,11 @@ python app.py Qwen/Qwen3-Coder-25B-mlx --trust_remote_code
 | `--host` | Host to bind to | `0.0.0.0` |
 | `--port` | Port to bind to | `8000` |
 | `--token-parser` | Token parser for tool calling | `qwen3_moe` |
+| `--message-converter` | Message converter for formatting messages | `openai` |
+| `--chat-template` | Custom chat template (file path or inline) | `None` |
 | `--prefill-batch-size` | Number of messages to prefill in batch | `8` |
 | `--completion-batch-size` | Number of messages to complete in batch | `32` |
-| `--max-kv-size` | Maximum size of key-value cache | `8096` |
+| `--max-kv-size` | Maximum size of key-value cache | `None` |
 | `--trust_remote_code` | Trust remote code when loading model | `False` |
 | `--verbose` | Enable verbose logging | `False` |
 | `--reload` | Enable auto-reload for development | `False` |
