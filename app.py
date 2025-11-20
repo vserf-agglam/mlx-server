@@ -47,6 +47,7 @@ class ServerConfig:
     """Server configuration"""
     model_name: str
     token_parser_name: Literal["qwen3_moe"]
+    message_converter_name: str = "openai"  # Message converter to use
     host: str = "0.0.0.0"
     port: int = 8000
     verbose: bool = False
@@ -54,6 +55,7 @@ class ServerConfig:
     completion_batch_size: int = 32
     trust_remote_code : bool = False,
     max_kv_size: int = 4096
+    chat_template: str | None = None  # Custom chat template (file path or inline template)
 
 # Global instances
 config: ServerConfig | None = None
@@ -99,9 +101,12 @@ async def lifespan(app: FastAPI):
     server = Server(
         model_name=config.model_name,
         token_parser_name=config.token_parser_name,
+        message_converter_name=config.message_converter_name,
         prefill_batch_size=config.prefill_batch_size,
         completion_batch_size=config.completion_batch_size,
         trust_remote_code=config.trust_remote_code,
+        max_kv_size=config.max_kv_size,
+        chat_template=config.chat_template
     )
     server.load()
     server.start_batch_processing()
@@ -470,6 +475,18 @@ def main():
         choices=['qwen3_moe'],
         help='Token parser to use for tool calling (default: qwen3_moe)'
     )
+    parser.add_argument(
+        '--message-converter',
+        default='openai',
+        choices=['openai', 'qwen3', 'anthropic'],
+        help='Message converter to use for formatting messages (default: openai)'
+    )
+    parser.add_argument(
+        '--chat-template',
+        type=str,
+        default=None,
+        help='Custom chat template (file path or inline template string)'
+    )
 
     args = parser.parse_args()
 
@@ -481,14 +498,15 @@ def main():
     config = ServerConfig(
         model_name=args.model_name_or_path,
         token_parser_name=args.token_parser,
+        message_converter_name=args.message_converter,
         host=args.host,
         port=args.port,
         verbose=args.verbose,
         completion_batch_size=args.completion_batch_size,
         prefill_batch_size=args.prefill_batch_size,
         trust_remote_code=args.trust_remote_code,
-        max_kv_size=args.max_kv_size
-
+        max_kv_size=args.max_kv_size,
+        chat_template=args.chat_template
     )
 
     signal.signal(signal.SIGINT, signal_handler)  # Handle Ctrl+C
@@ -501,6 +519,7 @@ def main():
     logger.info(f"Model: {config.model_name}")
     logger.info(f"Host: {config.host}:{config.port}")
     logger.info(f"Token Parser: {config.token_parser_name}")
+    logger.info(f"Message Converter: {config.message_converter_name}")
 
     # Create app
     app = create_app()
@@ -515,7 +534,8 @@ def main():
             app,
             host=config.host,
             port=config.port,
-            log_level="debug" if config.verbose else "info"
+            log_level="debug" if config.verbose else "info",
+
         )).serve())
     else:
         # Normal execution

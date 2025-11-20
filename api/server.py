@@ -1,4 +1,5 @@
 import logging
+import os
 import queue
 import time
 import threading
@@ -19,6 +20,8 @@ from api.types import (
 )
 from token_parser.base_token_parser import BaseTokenParser
 from token_parser.token_parser_factory import TokenParserFactory
+from message_converter.base_message_converter import BaseMessageConverter
+from message_converter.message_converter_factory import MessageConverterFactory
 from utils.custom_batch import CustomBatchGenerator
 from utils.prompt_cache_helper import PromptCacheHelper
 
@@ -30,11 +33,13 @@ class Server:
         self,
         model_name: str,
         token_parser_name: Literal["qwen3_moe"],
+        message_converter_name: str = "openai",
         prefill_batch_size: int = 8,
         completion_batch_size: int = 32,
         trust_remote_code: bool = False,
         max_kv_size: Optional[int] = None,
-        cache_path: str = "caches"
+        cache_path: str = "caches",
+        chat_template: Optional[str] = None
     ):
         self.loaded = False
         self.model_name = model_name
@@ -44,6 +49,10 @@ class Server:
         self.token_parser_name = token_parser_name
         self.token_parser: BaseTokenParser = TokenParserFactory.create(
             token_parser_name
+        )
+        self.message_converter_name = message_converter_name
+        self.message_converter: BaseMessageConverter = MessageConverterFactory.create(
+            message_converter_name
         )
         self.active_generations = {}  # prompt_id -> generation data
         self.batch_thread = None
@@ -56,6 +65,8 @@ class Server:
         self.max_kv_size = int(max_kv_size) if max_kv_size is not None else None
         self.cache_path = cache_path
         self.prompt_cache_manager = PromptCacheHelper(cache_path)
+        self.chat_template_input = chat_template
+        self.custom_chat_template = None
 
     def load(self):
         before_loading_time = time.time()
@@ -65,6 +76,11 @@ class Server:
         logger.info(f"Model loaded in {loading_time:.2f}s")
         self.model = model
         self.tokenizer = TokenizerWrapper(tokenizer)
+        
+        # Load custom chat template if provided
+        if self.chat_template_input:
+            self._load_custom_chat_template()
+        
         self.loaded = True
 
     def unload(self):
@@ -72,22 +88,68 @@ class Server:
         self.model = None
         self.tokenizer = None
         self.loaded = False
+    
+    def _load_custom_chat_template(self):
+        """Load and validate custom chat template"""
+        template_str = self.chat_template_input
+        
+        # Check if it's a file path
+        if os.path.exists(template_str):
+            logger.info(f"Loading custom chat template from file: {template_str}")
+            try:
+                with open(template_str, 'r') as f:
+                    template_str = f.read()
+            except Exception as e:
+                logger.error(f"Failed to read chat template file: {e}")
+                raise ValueError(f"Failed to read chat template file: {e}")
+        else:
+            logger.info("Using inline custom chat template")
+        
+        # Validate the template by attempting to use it
+        try:
+            # Test with a simple message
+            test_messages = [{
+                "role": "user",
+                "content": "Hello"
+            }]
+            test_result = self.tokenizer.apply_chat_template(
+                test_messages,
+                chat_template=template_str,
+                tokenize=False,
+                trust_remote_code=self.trust_remote_code
+            )
+            logger.info(f"Custom chat template validated successfully. Test output length: {len(test_result)}")
+            self.custom_chat_template = template_str
+        except Exception as e:
+            logger.error(f"Invalid custom chat template: {e}")
+            raise ValueError(f"Invalid custom chat template: {e}")
 
     def chat_template(self, messages_body: MessagesBody, **kwargs):
         """Apply chat template with OpenAI-compatible format.
 
         By default, add_generation_prompt=True (to append the assistant
         generation stub), but callers can override this via kwargs.
+        
+        If a custom chat template is configured, it will be used instead
+        of the tokenizer's default template.
         """
         openai_messages = messages_body.get_openai_compatible_messages()
         openai_tools = messages_body.get_openai_compatible_tools()
 
+        # Convert messages and tools to model-specific format
+        converted_messages = self.message_converter.convert_messages(openai_messages)
+        converted_tools = self.message_converter.convert_tools(openai_tools)
+
         # Allow callers to override whether the generation stub is added.
         kwargs.setdefault("add_generation_prompt", True)
+        
+        # Use custom template if available
+        if self.custom_chat_template:
+            kwargs["chat_template"] = self.custom_chat_template
 
         return self.tokenizer.apply_chat_template(
-            openai_messages,
-            tools=openai_tools,
+            converted_messages,
+            tools=converted_tools,
             trust_remote_code=self.trust_remote_code,
             **kwargs
         )
