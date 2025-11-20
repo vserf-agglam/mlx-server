@@ -150,6 +150,14 @@ def _make_cache(
         result = [to_batch_cache(c) for c in cache]
     else:
         cache = cache_mod.make_prompt_cache(model, max_kv_size=max_kv_size)
+        # Log original cache type before batching
+        if cache and len(cache) > 0:
+            cache_type = type(cache[0]).__name__
+            logger.info(
+                "Creating cache from model | type=%s, layers=%d",
+                cache_type,
+                len(cache)
+            )
         result = [to_batch_cache(c) for c in cache]
     
     # Log cache configuration

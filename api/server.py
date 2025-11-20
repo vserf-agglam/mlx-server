@@ -580,6 +580,17 @@ class Server:
             self.model,
             max_kv_size=self.max_kv_size,
         )
+        
+        # Log cache type being created
+        if cache and len(cache) > 0:
+            cache_type = type(cache[0]).__name__
+            logger.info(
+                "Building prompt cache | type=%s, layers=%d, max_kv_size=%s",
+                cache_type,
+                len(cache),
+                self.max_kv_size if self.max_kv_size else "unlimited"
+            )
+        
         inputs = mx.array([prefix_tokens], dtype=mx.uint32)
         try:
             self.model(inputs, cache=cache)
