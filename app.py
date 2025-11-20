@@ -484,22 +484,12 @@ def main():
         default=None,
         help='Custom chat template (file path or inline template string)'
     )
-    parser.add_argument(
-        '--debug-modules',
-        type=str,
-        nargs='*',
-        default=[],
-        help='Enable DEBUG logging for specific modules (e.g., utils.tool_stream_helper api.server)'
-    )
+
 
     args = parser.parse_args()
 
-    # Configure logging with centralized setup
-    module_levels = {}
-    for module in args.debug_modules:
-        module_levels[module] = "DEBUG"
-    
-    setup_logging(verbose=args.verbose, module_levels=module_levels)
+
+    setup_logging(verbose=args.verbose)
     
     # Log startup information
     logger.info(f"Starting MLX Advanced Server with verbose={'enabled' if args.verbose else 'disabled'}")
