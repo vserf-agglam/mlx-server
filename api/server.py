@@ -147,6 +147,8 @@ class Server:
         if self.custom_chat_template:
             kwargs["chat_template"] = self.custom_chat_template
 
+        print("apply chat template called")
+
         return self.tokenizer.apply_chat_template(
             converted_messages,
             tools=converted_tools,

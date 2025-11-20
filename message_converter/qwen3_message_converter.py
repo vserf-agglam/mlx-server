@@ -2,6 +2,7 @@ import json
 from typing import Any
 from message_converter.base_message_converter import BaseMessageConverter, logger
 
+
 class Qwen3MessageConverter(BaseMessageConverter):
     def convert_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         logger.debug(f"Qwen3 converter: processing {len(messages)} messages")
@@ -9,13 +10,29 @@ class Qwen3MessageConverter(BaseMessageConverter):
 
         for msg in messages:
             new_msg = msg.copy()
-            content = new_msg.get("content")
 
-            # --- 1. Parse JSON content if it exists ---
-            # Your input wraps tool usage inside a stringified JSON in 'content'.
-            # We need to unpack this first.
+            # =================================================================
+            # FIX: Handle existing tool_calls (from InputToolUseMessage)
+            # =================================================================
+            if "tool_calls" in new_msg and isinstance(new_msg["tool_calls"], list):
+                for tool_call in new_msg["tool_calls"]:
+                    if "function" in tool_call:
+                        args = tool_call["function"].get("arguments")
+                        # If arguments is a JSON string, parse it back to a dict
+                        if isinstance(args, str):
+                            try:
+                                tool_call["function"]["arguments"] = json.loads(args)
+                            except json.JSONDecodeError:
+                                logger.warning(f"Failed to parse tool arguments: {args}")
+
+            # =================================================================
+            # EXISTING LOGIC: Handle Tool Use hidden in "content" string
+            # =================================================================
+            content = new_msg.get("content")
             parsed_content = None
             is_json_content = False
+
+            # Attempt to parse content if it looks like JSON
             if isinstance(content, str) and content.strip().startswith('{'):
                 try:
                     parsed_content = json.loads(content)
@@ -23,42 +40,30 @@ class Qwen3MessageConverter(BaseMessageConverter):
                 except json.JSONDecodeError:
                     pass
 
-            # --- 2. Handle Assistant "Tool Use" ---
-            # Case: content looks like '{"type": "tool_use", "name": "...", "input": ...}'
+            # Case: content looks like '{"type": "tool_use", ...}'
             if (new_msg["role"] == "assistant" and
-                is_json_content and
-                parsed_content.get("type") == "tool_use"):
+                    is_json_content and
+                    parsed_content.get("type") == "tool_use"):
 
-                # Extract the tool details
                 func_name = parsed_content.get("name")
-                # Note: Your input uses "input", standard OpenAI uses "arguments"
                 arguments = parsed_content.get("input", {})
 
-                # Construct the structure Qwen3 template expects
                 qwen3_tool_call = {
                     "function": {
                         "name": func_name,
-                        "arguments": arguments  # Pass as dict, template handles serialization
+                        # Ensure this is a dict (parsed_content.get returns dict usually)
+                        "arguments": arguments
                     }
                 }
 
-                # Qwen3 expects this in a list under 'tool_calls'
                 new_msg["tool_calls"] = [qwen3_tool_call]
+                new_msg["content"] = ""  # Clear content to avoid duplication
 
-                # Clear the raw JSON content so it doesn't print to the user
-                new_msg["content"] = ""
-
-            # --- 3. Handle "Tool Result" (Output) ---
-            # Case: content looks like '{"type": "tool_result", "content": "..."}'
-            # AND strictly change role from 'user' to 'tool' so Qwen handles it correctly
+            # Case: content looks like '{"type": "tool_result", ...}'
             elif (is_json_content and
                   parsed_content.get("type") == "tool_result"):
 
-                # Switch role to 'tool' (Qwen template requires this specific role for results)
                 new_msg["role"] = "tool"
-
-                # Extract the actual inner content (the DB schema result)
-                # Sometimes the inner content is ALSO a stringified JSON (your example shows this)
                 inner_content = parsed_content.get("content", "")
                 new_msg["content"] = inner_content
 
