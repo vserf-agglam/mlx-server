@@ -20,8 +20,7 @@ from api.types import (
 )
 from token_parser.base_token_parser import BaseTokenParser
 from token_parser.token_parser_factory import TokenParserFactory
-from message_converter.base_message_converter import BaseMessageConverter
-from message_converter.message_converter_factory import MessageConverterFactory
+from utils.chat_template_manager import ChatTemplateManager
 from utils.custom_batch import CustomBatchGenerator
 from utils.prompt_cache_helper import PromptCacheHelper
 
@@ -50,10 +49,7 @@ class Server:
         self.token_parser: BaseTokenParser = TokenParserFactory.create(
             token_parser_name
         )
-        self.message_converter_name = message_converter_name
-        self.message_converter: BaseMessageConverter = MessageConverterFactory.create(
-            message_converter_name
-        )
+
         self.active_generations = {}  # prompt_id -> generation data
         self.batch_thread = None
         self.running = False
@@ -66,7 +62,8 @@ class Server:
         self.cache_path = cache_path
         self.prompt_cache_manager = PromptCacheHelper(cache_path)
         self.chat_template_input = chat_template
-        self.custom_chat_template = None
+        self.message_converter_name = message_converter_name
+        self.chat_template_manager = None
 
     def load(self):
         before_loading_time = time.time()
@@ -80,6 +77,12 @@ class Server:
         # Load custom chat template if provided
         if self.chat_template_input:
             self._load_custom_chat_template()
+
+        self.chat_template_manager = ChatTemplateManager(self.tokenizer,
+                                                         custom_chat_template=self.chat_template_input,
+                                                         message_converter_name=self.message_converter_name,
+                                                         trust_remote_code=self.trust_remote_code
+                                                         )
         
         self.loaded = True
 
@@ -133,28 +136,7 @@ class Server:
         If a custom chat template is configured, it will be used instead
         of the tokenizer's default template.
         """
-        openai_messages = messages_body.get_openai_compatible_messages()
-        openai_tools = messages_body.get_openai_compatible_tools()
-
-        # Convert messages and tools to model-specific format
-        converted_messages = self.message_converter.convert_messages(openai_messages)
-        converted_tools = self.message_converter.convert_tools(openai_tools)
-
-        # Allow callers to override whether the generation stub is added.
-        kwargs.setdefault("add_generation_prompt", True)
-        
-        # Use custom template if available
-        if self.custom_chat_template:
-            kwargs["chat_template"] = self.custom_chat_template
-
-        print("apply chat template called")
-
-        return self.tokenizer.apply_chat_template(
-            converted_messages,
-            tools=converted_tools,
-            trust_remote_code=self.trust_remote_code,
-            **kwargs
-        )
+        return self.chat_template_manager.chat_template(messages_body, **kwargs)
 
     def count_input_tokens(self, messages_body: MessagesBody):
         """Count the number of input tokens for a given chat template"""
