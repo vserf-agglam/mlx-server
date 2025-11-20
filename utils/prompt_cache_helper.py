@@ -7,10 +7,8 @@ from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 from api.types import (
     MessagesBody,
     MessagesResponse,
-    InputTextOrImageMessage,
-    InputToolUseMessage,
     OutputTextContentItem,
-    OutputToolContentItem,
+    OutputToolContentItem, InputMessageType, InputContentItem,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,32 +76,44 @@ class PromptCacheHelper:
                 # appending the tool call message, to keep ordering reasonable.
                 if current_text_parts:
                     new_body.messages.append(
-                        InputTextOrImageMessage(
+                        InputMessageType(
                             role="assistant",
-                            content="\n\n".join(current_text_parts),
-                            type="text",
+                            content=[
+                                InputContentItem(
+                                    type="text",
+                                    text="\n\n".join(current_text_parts),
+                                )
+                            ],
                         )
                     )
                     appended_any = True
                     current_text_parts = []
 
                 new_body.messages.append(
-                    InputToolUseMessage(
-                        type="tool_use",
-                        id=item.id,
-                        name=item.name,
-                        input=item.input,
+                    InputMessageType(
+                        role="tool",
+                        content=[
+                            InputContentItem(
+                                id=item.id,
+                                type="tool_call",
+                                input=item.input,
+                                name=item.name
+                            )
+                        ]
                     )
+
                 )
                 appended_any = True
 
         # Flush any remaining assistant text at the end.
         if current_text_parts:
             new_body.messages.append(
-                InputTextOrImageMessage(
+                InputMessageType(
                     role="assistant",
-                    content="\n\n".join(current_text_parts),
-                    type="text",
+                    content=[InputContentItem(
+                        type="text",
+                        text="\n\n".join(current_text_parts),
+                    )],
                 )
             )
             appended_any = True
