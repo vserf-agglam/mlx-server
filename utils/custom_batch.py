@@ -79,16 +79,15 @@ def _batchify_kv_layer(
 
 
 def _make_batch_cache_from_prompt_caches(
-    prompt_caches: List[Optional[List[Any]]],
-    left_padding: List[int],
-    max_kv_size: Optional[int],
-    kv_keep: int,
-    model,
+        prompt_caches: List[Optional[List[Any]]],
+        left_padding: List[int],
+        max_kv_size: Optional[int],
+        kv_keep: int,
+        model,
 ) -> List[Any]:
     """
     Build a batched cache from per-prompt prompt caches.
-
-    If all prompt_caches are None, falls back to the default _make_cache.
+    Correctly handles stacking tensors and converting offset types.
     """
     if all(c is None for c in prompt_caches):
         logger.info("Creating new batch cache (no prompt caches provided)")
@@ -96,18 +95,102 @@ def _make_batch_cache_from_prompt_caches(
 
     cache_lists = [c for c in prompt_caches if c is not None]
     num_layers = len(cache_lists[0])
+
+    # Validate layer consistency
     if any(len(c) != num_layers for c in cache_lists):
         raise ValueError("All prompt_caches must have same per-layer length.")
 
     batched: List[Any] = []
-    for layer_idx in range(num_layers):
-        layer_caches = [c[layer_idx] for c in cache_lists]
+    logger.info(
+        "Loading prompt caches | layers=%d, max_kv_size=%s, kv_keep=%d",
+        num_layers,
+        max_kv_size if max_kv_size else "unlimited",
+        kv_keep
+    )
 
-        if isinstance(layer_caches[0], KVCache):
+    for layer_idx in range(num_layers):
+        # Get the specific layer cache for every batch item
+        layer_caches = [c[layer_idx] for c in cache_lists]
+        cache_type = type(layer_caches[0]).__name__
+
+        if "RotatingKVCache" in cache_type:
+            # 1. Determine Batch Configuration
+            # We use the first cache to determine dimensions, but we must handle the stack
+            src_0 = layer_caches[0]
+            current_size = src_0.keys.shape[2] if src_0.keys is not None else 0
+
+            # Cap size if max_kv_size is set (truncation logic might be needed strictly,
+            # but usually we assume prompts fit in the config)
+            size = src_0.max_size
+            if max_kv_size is not None:
+                size = min(size, max_kv_size)
+
+            # 2. Create the new Batched Cache
+            batch_cache = CustomBatchRotatingKVCache(size, left_padding, keep=kv_keep)
+
+            # 3. Stack Keys and Values
+            # We assume all caches in the batch are in the same state (e.g. just finished prefill).
+            # If one is rotated and another is not, batching is mathematically impossible
+            # without linearization. We assume they are standard.
+            try:
+                # Stack along batch dimension (axis 0)
+                # shape: [Batch, Heads, Seq, Dim]
+                batched_keys = mx.concatenate([c.keys for c in layer_caches], axis=0)
+                batched_values = mx.concatenate([c.values for c in layer_caches], axis=0)
+
+                batch_cache.keys = batched_keys
+                batch_cache.values = batched_values
+            except ValueError as e:
+                logger.error(
+                    f"Failed to stack caches at layer {layer_idx}. Shapes: {[c.keys.shape for c in layer_caches]}")
+                raise e
+
+            # 4. Handle Offsets
+            # Source standard caches use 'offset' (int). New cache uses 'offset' (Array).
+            # We gather the integer offsets from all source caches.
+            offsets_list = []
+            for c in layer_caches:
+                if hasattr(c, "offset"):
+                    # Handle standard MLX cache where offset is int
+                    offsets_list.append(int(c.offset))
+                elif hasattr(c, "_offset"):
+                    # Handle cases where it might be stored internally
+                    offsets_list.append(int(c._offset))
+                else:
+                    # Fallback based on key length
+                    offsets_list.append(c.keys.shape[2])
+
+            batch_cache.offset = mx.array(offsets_list)
+
+            # 5. Restore Internal State
+            # We calculate _offset (the unified write pointer) based on the max offset in the batch
+            batch_cache._offset = int(mx.max(batch_cache.offset).item())
+
+            # If loaded caches were already full/rotated
+            # (We assume the 'idx' insertion point is consistent across the batch)
+            if hasattr(src_0, "_idx"):
+                batch_cache._idx = src_0._idx
+            else:
+                # Fallback for standard MLX caches which might use offset as idx
+                batch_cache._idx = src_0.offset if src_0.offset < src_0.max_size else 0
+
+            # Explicitly check rotation status based on keys
+            batch_cache.rotated = (batched_keys.shape[2] == batch_cache.max_size)
+
+            batched.append(batch_cache)
+
+            if layer_idx == 0:
+                logger.info(
+                    "Loaded RotatingKVCache | size=%d, keep=%d, batch_size=%d",
+                    size, kv_keep, len(layer_caches)
+                )
+
+        elif isinstance(layer_caches[0], KVCache):
             batched.append(_batchify_kv_layer(layer_caches, left_padding))
+
         else:
             raise ValueError(
-                f"Per-prompt cache type {type(layer_caches[0])} "
+                f"Per-prompt cache type {cache_type} "
                 "not supported yet for batched different prompt caches."
             )
 
