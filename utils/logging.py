@@ -1,5 +1,6 @@
 # Configure logging with multiple levels like server.py
 import logging
+import sys
 
 
 class ColoredFormatter(logging.Formatter):
@@ -20,9 +21,23 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record)
 
 # Set up logging
-def setup_logging(verbose: bool = False):
-    """Configure logging with appropriate handlers and formatters"""
+def setup_logging(verbose: bool = False, module_levels: dict[str, str] = None):
+    """Configure logging with appropriate handlers and formatters
+    
+    Args:
+        verbose: Enable DEBUG level logging for root logger
+        module_levels: Dict of module_name -> log_level to set specific module log levels
+    """
     level = logging.DEBUG if verbose else logging.INFO
+    
+    # Default module levels - these modules are particularly noisy at DEBUG level
+    default_module_levels = {
+        "uvicorn": "INFO",
+        "uvicorn.access": "WARNING",
+    }
+    
+    if module_levels:
+        default_module_levels.update(module_levels)
 
     # Remove existing handlers
     root_logger = logging.getLogger()
@@ -42,10 +57,22 @@ def setup_logging(verbose: bool = False):
     root_logger.setLevel(level)
     root_logger.addHandler(console_handler)
 
-    # Set specific loggers
-    logging.getLogger("uvicorn").setLevel(logging.INFO)
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # Set specific module loggers
+    for module_name, module_level in default_module_levels.items():
+        module_logger = logging.getLogger(module_name)
+        module_logger.setLevel(getattr(logging, module_level.upper()))
+    
+    # Allow environment variable override for specific modules
+    import os
+    for key, value in os.environ.items():
+        if key.startswith('LOG_LEVEL_'):
+            module_name = key[10:].lower().replace('_', '.')
+            try:
+                module_logger = logging.getLogger(module_name)
+                module_logger.setLevel(getattr(logging, value.upper()))
+                root_logger.info(f"Set {module_name} log level to {value} from environment")
+            except AttributeError:
+                root_logger.warning(f"Invalid log level {value} for module {module_name}")
 
     return root_logger
 
-logger = setup_logging()

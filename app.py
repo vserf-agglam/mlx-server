@@ -33,12 +33,9 @@ from utils.sse_event_builders import (
     build_message_stop_event,
     build_error_event,
 )
+from utils.logging import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Module will be configured with appropriate logging level later
 logger = logging.getLogger(__name__)
 
 
@@ -487,12 +484,27 @@ def main():
         default=None,
         help='Custom chat template (file path or inline template string)'
     )
+    parser.add_argument(
+        '--debug-modules',
+        type=str,
+        nargs='*',
+        default=[],
+        help='Enable DEBUG logging for specific modules (e.g., utils.tool_stream_helper api.server)'
+    )
 
     args = parser.parse_args()
 
-    # Set logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Configure logging with centralized setup
+    module_levels = {}
+    for module in args.debug_modules:
+        module_levels[module] = "DEBUG"
+    
+    setup_logging(verbose=args.verbose, module_levels=module_levels)
+    
+    # Log startup information
+    logger.info(f"Starting MLX Advanced Server with verbose={'enabled' if args.verbose else 'disabled'}")
+    if args.debug_modules:
+        logger.info(f"DEBUG logging enabled for modules: {', '.join(args.debug_modules)}")
 
     # Create config
     config = ServerConfig(
@@ -515,7 +527,6 @@ def main():
     # Register cleanup function to run on exit
     atexit.register(cleanup)
 
-    logger.info(f"Starting MLX Advanced Server")
     logger.info(f"Model: {config.model_name}")
     logger.info(f"Host: {config.host}:{config.port}")
     logger.info(f"Token Parser: {config.token_parser_name}")
