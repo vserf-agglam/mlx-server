@@ -1,73 +1,71 @@
 import json
 from typing import Any
+from api.types import InputMessageType
 from message_converter.base_message_converter import BaseMessageConverter, logger
 
 
 class Qwen3MessageConverter(BaseMessageConverter):
-    def convert_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        logger.debug(f"Qwen3 converter: processing {len(messages)} messages")
+    def convert_messages(self, messages: list[InputMessageType]):
         converted_messages = []
 
         for msg in messages:
-            new_msg = msg.copy()
+            if isinstance(msg.content, list):
+                text_parts = ""
+                tool_calls = []
+                tool_results = []
 
-            # =================================================================
-            # FIX: Handle existing tool_calls (from InputToolUseMessage)
-            # =================================================================
-            if "tool_calls" in new_msg and isinstance(new_msg["tool_calls"], list):
-                for tool_call in new_msg["tool_calls"]:
-                    if "function" in tool_call:
-                        args = tool_call["function"].get("arguments")
-                        # If arguments is a JSON string, parse it back to a dict
-                        if isinstance(args, str):
-                            try:
-                                tool_call["function"]["arguments"] = json.loads(args)
-                            except json.JSONDecodeError:
-                                logger.warning(f"Failed to parse tool arguments: {args}")
+                for content in msg.content:
+                    # 1. Handle Text
+                    if content.type == "text":
+                        text_parts += content.text
 
-            # =================================================================
-            # EXISTING LOGIC: Handle Tool Use hidden in "content" string
-            # =================================================================
-            content = new_msg.get("content")
-            parsed_content = None
-            is_json_content = False
+                    # 2. Handle Tool Calls (Assistant side)
+                    if content.type == "tool_call" or content.type == "tool_use":
+                        tool_calls.append({
+                            "function": {
+                                "name": content.name,
+                                "arguments": json.loads(content.input) if isinstance(content.input,
+                                                                                     str) else content.input
+                            }
+                        })
 
-            # Attempt to parse content if it looks like JSON
-            if isinstance(content, str) and content.strip().startswith('{'):
-                try:
-                    parsed_content = json.loads(content)
-                    is_json_content = True
-                except json.JSONDecodeError:
-                    pass
+                    # 3. Handle Tool Results
+                    # FIX: Don't transform this into a dict yet; keep the object
+                    # so we can access .tool_use_id and .content later.
+                    if content.type == "tool_result":
+                        tool_results.append(content)
 
-            # Case: content looks like '{"type": "tool_use", ...}'
-            if (new_msg["role"] == "assistant" and
-                    is_json_content and
-                    parsed_content.get("type") == "tool_use"):
-
-                func_name = parsed_content.get("name")
-                arguments = parsed_content.get("input", {})
-
-                qwen3_tool_call = {
-                    "function": {
-                        "name": func_name,
-                        # Ensure this is a dict (parsed_content.get returns dict usually)
-                        "arguments": arguments
+                # Append Assistant/User Message (Text + Tool Calls)
+                if len(tool_calls) > 0 or text_parts != "":
+                    msg_body = {
+                        "role": msg.role,
+                        "content": text_parts,
                     }
-                }
 
-                new_msg["tool_calls"] = [qwen3_tool_call]
-                new_msg["content"] = ""  # Clear content to avoid duplication
+                    if len(tool_calls) > 0:
+                        msg_body["tool_calls"] = tool_calls
 
-            # Case: content looks like '{"type": "tool_result", ...}'
-            elif (is_json_content and
-                  parsed_content.get("type") == "tool_result"):
+                    converted_messages.append(msg_body)
 
-                new_msg["role"] = "tool"
-                inner_content = parsed_content.get("content", "")
-                new_msg["content"] = inner_content
+                # Append Tool Result Messages
+                # FIX: Iterate over the stored objects and format correctly for Qwen
+                if tool_results:
+                    for tool_result in tool_results:
+                        converted_messages.append({
+                            "role": "tool",
+                            # Map the tool_use_id correctly
+                            "tool_call_id": tool_result.tool_use_id,
+                            # Ensure content is a string
+                            "content": tool_result.content if isinstance(tool_result.content, str) else json.dumps(
+                                tool_result.content)
+                        })
 
-            converted_messages.append(new_msg)
+            else:
+                # Handle simple string content
+                converted_messages.append({
+                    "role": msg.role,
+                    "content": msg.content
+                })
 
         return converted_messages
 
