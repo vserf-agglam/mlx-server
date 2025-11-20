@@ -37,6 +37,7 @@ class Server:
         completion_batch_size: int = 32,
         trust_remote_code: bool = False,
         max_kv_size: Optional[int] = None,
+        kv_keep: int = 4,
         cache_path: str = "caches",
         chat_template: Optional[str] = None
     ):
@@ -59,6 +60,7 @@ class Server:
         # Ensure max_kv_size is always an integer; this guards against
         # CLI argument parsing passing a string value through.
         self.max_kv_size = int(max_kv_size) if max_kv_size is not None else None
+        self.kv_keep = kv_keep
         self.cache_path = cache_path
         self.prompt_cache_manager = PromptCacheHelper(cache_path)
         self.chat_template_input = chat_template
@@ -430,6 +432,7 @@ class Server:
             prefill_batch_size=self.prefill_batch_size,
             completion_batch_size=self.completion_batch_size,
             max_kv_size=self.max_kv_size,
+            kv_keep=self.kv_keep,
         )
         active_uids = {}  # Maps batch uid to prompt_id
 

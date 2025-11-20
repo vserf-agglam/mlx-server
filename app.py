@@ -55,6 +55,7 @@ class ServerConfig:
     completion_batch_size: int = 32
     trust_remote_code : bool = False,
     max_kv_size: int = 4096
+    kv_keep: int = 4
     chat_template: str | None = None  # Custom chat template (file path or inline template)
 
 # Global instances
@@ -106,6 +107,7 @@ async def lifespan(app: FastAPI):
         completion_batch_size=config.completion_batch_size,
         trust_remote_code=config.trust_remote_code,
         max_kv_size=config.max_kv_size,
+        kv_keep=config.kv_keep,
         chat_template=config.chat_template
     )
     server.load()
@@ -465,6 +467,7 @@ def main():
     parser.add_argument('--port', type=int, default=8000, help='Port to bind to (default: 8000)')
     parser.add_argument('--reload', action='store_true', help='Enable auto-reload for development')
     parser.add_argument("--max-kv-size", type=int, default=None, help="Maximum size of key-value cache (default: none)")
+    parser.add_argument("--kv-keep", type=int, default=4, help="Number of tokens to keep in rotating KV cache (default: 4)")
     parser.add_argument("--prefill-batch-size", type=int, default=8, help="Number of messages to prefill batch (default: 8)")
     parser.add_argument("--completion-batch-size", type=int, default=32, help="Number of messages to complete batch (default: 8)")
     parser.add_argument("--trust_remote_code", default=False, action='store_true', help='Trust remote code')
@@ -506,6 +509,7 @@ def main():
         prefill_batch_size=args.prefill_batch_size,
         trust_remote_code=args.trust_remote_code,
         max_kv_size=args.max_kv_size,
+        kv_keep=args.kv_keep,
         chat_template=args.chat_template
     )
 
