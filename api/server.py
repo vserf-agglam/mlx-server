@@ -87,6 +87,14 @@ class Server:
                                                          )
         
         self.loaded = True
+        
+        # Log memory stats after model loading
+        try:
+            memory_gb = mx.get_active_memory() / 1e9
+            peak_gb = mx.get_peak_memory() / 1e9
+            logger.info(f"Model loaded | VRAM: {memory_gb:.2f}GB (peak: {peak_gb:.2f}GB)")
+        except AttributeError:
+            logger.info("Model loaded successfully")
 
     def unload(self):
         self.stop_batch_processing()
@@ -145,11 +153,6 @@ class Server:
         prompt = self.chat_template(messages_body, tokenize=False)
         prompt_tokens = self.tokenizer.encode(prompt)
         token_count = len(prompt_tokens)
-        logger.debug(
-            "count_input_tokens: prompt_len_chars=%d, token_count=%d",
-            len(prompt),
-            token_count,
-        )
         return token_count
 
     def create_messages_response(
@@ -223,13 +226,6 @@ class Server:
         prompt = self.chat_template(messages_body, tokenize=False)
         prompt_tokens_full = self.tokenizer.encode(prompt)
         prompt_id = f"prompt_{uuid4().hex}"
-        logger.debug(
-            "add_to_batch: created prompt_id=%s, prompt_len_chars=%d, "
-            "prompt_tokens_full_len=%d",
-            prompt_id,
-            len(prompt),
-            len(prompt_tokens_full),
-        )
 
         cache, cache_prompt = self.prompt_cache_manager.find_matching_cache_from_messages_body(
             # For cache lookup, use a canonical prompt that does NOT
@@ -268,46 +264,12 @@ class Server:
                     prompt_tokens = prompt_tokens_full[cached_token_count:]
                     prompt_cache_for_generator = cache
             else:
-                # Extra debug to understand why the cache is unusable.
-                logger.debug(
-                    "add_to_batch: prefix cache unusable for %s; "
-                    "cache_prompt_tokens_len=%d, full_prompt_tokens_len=%d, "
-                    "prefix_len_ok=%s, prefix_tokens_match=%s, "
-                    "cache_prompt_snippet=%r, full_prompt_snippet=%r",
-                    prompt_id,
-                    cache_prompt_tokens_len,
-                    full_prompt_tokens_len,
-                    prefix_len_ok,
-                    prefix_tokens_match,
-                    cache_prompt if cache_prompt is not None else None,
-                    prompt,
-                )
+                pass
 
         # We consider it a cache hit when we can actually reuse a prefix
         # cache for this generation.
         cache_hit = prompt_cache_for_generator is not None
 
-        # Detailed logging for cache usage decisions.
-        if prompt_cache_for_generator is not None:
-            logger.debug(
-                "add_to_batch: using prefix cache for %s "
-                "(cache_prompt_tokens=%s, suffix_tokens=%d)",
-                prompt_id,
-                cache_prompt_tokens_len,
-                len(prompt_tokens),
-            )
-        elif cache is not None:
-            logger.debug(
-                "add_to_batch: found cache for a messages prefix but "
-                "could not safely reuse it for %s (likely token "
-                "prefix mismatch or too short); falling back to full prompt",
-                prompt_id,
-            )
-        else:
-            logger.debug(
-                "add_to_batch: no prompt cache available for %s; using full prompt",
-                prompt_id,
-            )
 
         # Initialize tracking
         self.active_generations[prompt_id] = {
@@ -332,7 +294,6 @@ class Server:
             "prompt_cache_hit": cache_hit,
         })
 
-        logger.debug(f"Added prompt {prompt_id} to batch queue")
         return prompt_id
 
     def get_result(self, prompt_id: str, remove: bool = True) -> MessagesResponse | None:
@@ -406,14 +367,6 @@ class Server:
         new_tokens = gen_data["tokens"][last_index:]
         gen_data["last_token_index"] = len(gen_data["tokens"])
 
-        if new_tokens:
-            logger.debug(
-                "get_streaming_tokens: prompt_id=%s, new_tokens_count=%d, "
-                "new_tokens=%s",
-                prompt_id,
-                len(new_tokens),
-                new_tokens,
-            )
 
         return new_tokens
 
@@ -435,6 +388,15 @@ class Server:
             kv_keep=self.kv_keep,
         )
         active_uids = {}  # Maps batch uid to prompt_id
+        
+        # Log KV cache configuration at startup
+        logger.info(
+            "KV Cache Configuration: max_kv_size=%s, kv_keep=%d | prefill_batch=%d, completion_batch=%d",
+            self.max_kv_size if self.max_kv_size else "unlimited",
+            self.kv_keep,
+            self.prefill_batch_size,
+            self.completion_batch_size
+        )
 
         logger.info("Starting continuous batch generation loop")
 
@@ -477,13 +439,6 @@ class Server:
                                 # they are only used to signal termination.
                                 if r.token is not None and r.finish_reason != "stop":
                                     gen_data["tokens"].append(r.token)
-                                    logger.debug(
-                                        "continuous_batch_generate: prompt_id=%s, "
-                                        "appended_token=%s, total_tokens=%d",
-                                        prompt_id,
-                                        r.token,
-                                        len(gen_data["tokens"]),
-                                    )
 
                                 if r.finish_reason is not None:
                                     gen_data["completed"] = True
@@ -516,15 +471,27 @@ class Server:
         prompt_text = gen_data.get("prompt", "")
 
         try:
-            logger.debug(
-                "on_generation_complete: prompt_id=%s, finish_reason=%s, "
-                "input_tokens=%d, output_tokens=%d, prompt_cache_hit=%s",
-                prompt_id,
-                gen_data.get("finish_reason"),
-                gen_data.get("input_tokens"),
-                len(gen_data.get("tokens", [])),
-                gen_data.get("prompt_cache_hit"),
-            )
+            # Log generation completion with key stats including memory
+            try:
+                memory_gb = mx.get_active_memory() / 1e9
+                logger.info(
+                    "Generation complete: %s | %s | in=%d out=%d cache_hit=%s | VRAM=%.2fGB",
+                    prompt_id[:8],
+                    gen_data.get("finish_reason"),
+                    gen_data.get("input_tokens"),
+                    len(gen_data.get("tokens", [])),
+                    gen_data.get("prompt_cache_hit"),
+                    memory_gb,
+                )
+            except AttributeError:
+                logger.info(
+                    "Generation complete: %s | %s | in=%d out=%d cache_hit=%s",
+                    prompt_id[:8],
+                    gen_data.get("finish_reason"),
+                    gen_data.get("input_tokens"),
+                    len(gen_data.get("tokens", [])),
+                    gen_data.get("prompt_cache_hit"),
+                )
 
             # Cache for the current prompt (conversation up to this turn),
             # using a canonical prompt that does NOT include the assistant
@@ -537,44 +504,17 @@ class Server:
                     add_generation_prompt=False,
                 )
                 if self.prompt_cache_manager.load_cache(base_prompt_for_cache) is None:
-                    logger.debug(
-                        "on_generation_complete: building base cache for %s "
-                        "(base_prompt_len_chars=%d)",
-                        prompt_id,
-                        len(base_prompt_for_cache),
-                    )
+                    logger.info("Building base cache for %s", prompt_id[:8])
                     self._build_and_save_prompt_cache(base_prompt_for_cache)
-                else:
-                    logger.debug(
-                        "on_generation_complete: base cache already exists for %s; "
-                        "skipping base cache build",
-                        prompt_id,
-                    )
             elif prompt_text:
                 # Fallback for non-chat usage: cache the raw prompt string.
                 if self.prompt_cache_manager.load_cache(prompt_text) is None:
-                    logger.debug(
-                        "on_generation_complete: building base cache from raw "
-                        "prompt_text for %s (prompt_len_chars=%d)",
-                        prompt_id,
-                        len(prompt_text),
-                    )
+                    logger.info("Building base cache for %s", prompt_id[:8])
                     self._build_and_save_prompt_cache(prompt_text)
-                else:
-                    logger.debug(
-                        "on_generation_complete: base cache already exists for %s; "
-                        "skipping base cache build",
-                        prompt_id,
-                    )
 
             # Cache for the extended "next turn" prompt, built by appending
             # this assistant response to the original MessagesBody.
             if original_body is not None:
-                logger.debug(
-                    "on_generation_complete: attempting extended cache build "
-                    "for %s",
-                    prompt_id,
-                )
                 generated_text = self.tokenizer.decode(gen_data["tokens"])
                 tmp_response = self.create_messages_response(
                     generated_text,
@@ -596,19 +536,8 @@ class Server:
                         self.prompt_cache_manager.load_cache(extended_prompt)
                         is None
                     ):
-                        logger.debug(
-                            "on_generation_complete: building extended cache "
-                            "for %s (extended_prompt_len_chars=%d)",
-                            prompt_id,
-                            len(extended_prompt),
-                        )
                         self._build_and_save_prompt_cache(extended_prompt)
-                    else:
-                        logger.debug(
-                            "on_generation_complete: extended cache already "
-                            "exists for %s; skipping extended cache build",
-                            prompt_id,
-                        )
+
                 else:
                     logger.debug(
                         "on_generation_complete: extended body is None for %s; "
@@ -712,13 +641,6 @@ class Server:
             if new_tokens:
                 # Decode and yield new tokens
                 token_text = self.tokenizer.decode(new_tokens)
-                logger.debug(
-                    "generate_stream: prompt_id=%s, decoded_text_len=%d, "
-                    "decoded_text=%r",
-                    prompt_id,
-                    len(token_text) if token_text else 0,
-                    token_text[:100] if token_text else "",
-                )
                 if token_text:
                     yield {"delta": token_text}
 
